@@ -1,0 +1,2057 @@
+//! The eframe/egui application: onboarding, dashboards, settings and the
+//! glue between the engine, the platform threads and the UI.
+//!
+//! Threading model:
+//!
+//! * The engine pushes status/notices/clipboard/input callbacks from its own
+//!   runtime threads; [`AppShared`] is the (lock-based) meeting point. UI state
+//!   is never touched from there — only snapshots are stored and a repaint is
+//!   requested.
+//! * The hook thread ([`crate::platform::input`]) reads the small
+//!   [`crate::platform::input::CaptureState`] snapshot to know whether input
+//!   belongs to this machine or to the peer.
+//! * The UI thread owns everything visual, the tray icon and the text edit
+//!   buffers.
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use crossbeam_channel::{Receiver, Sender};
+use eframe::egui;
+use flowlink_core::engine::{Cmd, Engine};
+use flowlink_core::host::Host;
+use flowlink_core::types::{Edge, HostInput, Hotkey, InputEvent, Mode, Modifiers};
+use parking_lot::{Mutex, RwLock};
+use serde::Deserialize;
+use tracing::{info, warn};
+
+use crate::platform::{autostart, clipboard, input};
+use crate::theme::{self, Theme};
+use crate::tray::{self, TrayCommand};
+
+/// Name of the marker file that records "onboarding finished".
+const ONBOARDED_MARKER: &str = ".onboarded";
+
+/// How often the pairing QR code is regenerated while the server page is open.
+const QR_REFRESH: Duration = Duration::from_secs(2);
+
+/// How many notices are kept for the notice bar.
+const NOTICE_HISTORY: usize = 20;
+
+/// How long a non-error notice stays visible in the footer.
+const NOTICE_LIFETIME: Duration = Duration::from_secs(20);
+
+// ---------------------------------------------------------------------------
+// Status mirror
+// ---------------------------------------------------------------------------
+
+/// Connection state, mirroring `flowlink_core::status::ConnState` (which is
+/// serialization-only).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnStateMirror {
+    #[default]
+    Off,
+    Listening,
+    Connecting,
+    Handshake,
+    AwaitingPair,
+    Pairing,
+    Connected,
+    Reconnecting,
+    Error,
+}
+
+/// This device's identity, as reported by the engine.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct LocalInfoMirror {
+    pub id: String,
+    pub name: String,
+    pub fingerprint: String,
+    pub addrs: Vec<String>,
+    pub port: u16,
+}
+
+/// The connected peer.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PeerMirror {
+    pub id: String,
+    pub name: String,
+    pub fingerprint: Option<String>,
+    pub addr: String,
+    pub paired: bool,
+    pub since_ms: u64,
+}
+
+/// Pairing state (server: code; client: code entry pending).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PairingMirror {
+    pub code: Option<String>,
+    pub attempts_left: u8,
+    pub expires_in_ms: u64,
+    pub awaiting_input: bool,
+}
+
+/// A device seen on the LAN.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct DeviceMirror {
+    pub id: String,
+    pub name: String,
+    pub fingerprint: String,
+    pub addr: Option<String>,
+    pub port: u16,
+    pub role: Option<Mode>,
+    pub version: Option<String>,
+    pub last_seen_ms: u64,
+}
+
+/// A device we have paired with before.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PairedDeviceMirror {
+    pub id: String,
+    pub name: String,
+    pub fingerprint: String,
+    pub last_addr: Option<String>,
+    pub last_seen_ms: u64,
+}
+
+/// Traffic/latency counters.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MetricsMirror {
+    pub rtt_ms: f32,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub events_out: u64,
+    pub events_in: u64,
+    pub connected_since_ms: Option<u64>,
+    pub uptime_ms: u64,
+}
+
+/// Parsed copy of the status JSON the engine pushes to
+/// [`Host::on_status`](flowlink_core::host::Host::on_status).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct StatusMirror {
+    pub app: String,
+    pub version: String,
+    pub mode: Option<Mode>,
+    pub state: ConnStateMirror,
+    pub error: Option<String>,
+    pub reconnect_in_ms: Option<u64>,
+    pub local: LocalInfoMirror,
+    pub peer: Option<PeerMirror>,
+    pub pairing: Option<PairingMirror>,
+    pub remote_active: bool,
+    pub remote_edge: Option<Edge>,
+    pub edge: Option<Edge>,
+    pub clipboard_enabled: bool,
+    pub hotkey: Hotkey,
+    pub discovered: Vec<DeviceMirror>,
+    pub paired_devices: Vec<PairedDeviceMirror>,
+    pub metrics: MetricsMirror,
+    pub listening: bool,
+}
+
+impl StatusMirror {
+    fn is_server(&self) -> bool {
+        self.mode == Some(Mode::Server)
+    }
+
+    fn is_running(&self) -> bool {
+        self.state != ConnStateMirror::Off
+    }
+
+    fn edge(&self) -> Edge {
+        self.edge.unwrap_or(Edge::Right)
+    }
+}
+
+/// A message the engine sent through
+/// [`Host::on_notice`](flowlink_core::host::Host::on_notice).
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub kind: String,
+    pub message: String,
+    /// When the notice arrived (local clock, not part of the wire format).
+    pub at: Instant,
+}
+
+/// Wire shape of a notice (`{"kind": "...", "message": "..."}`).
+#[derive(Clone, Debug, Deserialize)]
+struct NoticeWire {
+    kind: String,
+    message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Shared state
+// ---------------------------------------------------------------------------
+
+/// State shared between the engine threads, the platform threads and the UI
+/// thread. Implements [`Host`].
+pub struct AppShared {
+    /// Set right after `Engine::new` returns (the engine needs the host, so it
+    /// cannot exist before it).
+    engine: OnceLock<Arc<Engine>>,
+    status: RwLock<StatusMirror>,
+    notices: Mutex<VecDeque<Notice>>,
+    /// Snapshot consumed by the hook thread and the clipboard poller.
+    capture: Arc<RwLock<input::CaptureState>>,
+    /// Echo suppression for clipboard sync.
+    fingerprint: Arc<clipboard::Fingerprint>,
+    /// Wakes the UI; available once the window exists.
+    ctx: Mutex<Option<egui::Context>>,
+}
+
+impl AppShared {
+    fn new() -> Arc<Self> {
+        Arc::new(AppShared {
+            engine: OnceLock::new(),
+            status: RwLock::new(StatusMirror::default()),
+            notices: Mutex::new(VecDeque::new()),
+            capture: Arc::new(RwLock::new(input::CaptureState::default())),
+            fingerprint: clipboard::Fingerprint::new(),
+            ctx: Mutex::new(None),
+        })
+    }
+
+    fn set_engine(&self, engine: Arc<Engine>) {
+        let _ = self.engine.set(engine);
+    }
+
+    fn capture_state(&self) -> Arc<RwLock<input::CaptureState>> {
+        Arc::clone(&self.capture)
+    }
+
+    fn fingerprint(&self) -> Arc<clipboard::Fingerprint> {
+        Arc::clone(&self.fingerprint)
+    }
+
+    fn set_ctx(&self, ctx: egui::Context) {
+        *self.ctx.lock() = Some(ctx);
+    }
+
+    /// Ask the UI thread for a new frame (no-op before the window exists).
+    pub fn request_repaint(&self) {
+        if let Some(ctx) = self.ctx.lock().as_ref() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Restore and focus the main window.
+    ///
+    /// Safe to call from any thread (the tray posts it when the window is
+    /// hidden and the UI thread may not be running frames yet).
+    pub fn show_window(&self) {
+        if let Some(ctx) = self.ctx.lock().as_ref() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.request_repaint();
+        }
+    }
+
+    fn snapshot_status(&self) -> StatusMirror {
+        self.status.read().clone()
+    }
+
+    fn notices(&self) -> Vec<Notice> {
+        self.notices.lock().iter().cloned().collect()
+    }
+
+    fn clear_notices(&self) {
+        self.notices.lock().clear();
+    }
+
+    /// Store a status snapshot and propagate the parts the platform threads
+    /// need (mode, remote state, hotkey).
+    fn apply_status(&self, status: StatusMirror) {
+        {
+            let mut capture = self.capture.write();
+            capture.mode_is_server = status.is_server();
+            capture.clipboard_enabled = status.clipboard_enabled;
+            capture.remote_edge = status.remote_edge;
+            capture.hotkey_mods = status.hotkey.modifiers;
+            capture.hotkey_usage = status.hotkey.usage;
+        }
+        let was_active = self.status.read().remote_active;
+        let now_active = status.remote_active;
+        *self.status.write() = status;
+        if was_active != now_active {
+            // Cursor visibility follows remote control in both roles.
+            input::update_remote_active(now_active);
+        }
+    }
+}
+
+impl Host for AppShared {
+    fn on_status(&self, status_json: &str) {
+        match serde_json::from_str::<StatusMirror>(status_json) {
+            Ok(status) => {
+                self.apply_status(status);
+                self.request_repaint();
+            }
+            // The engine and this shell ship as one binary, so this can only
+            // happen on a protocol bug; keep the previous snapshot.
+            Err(err) => warn!("could not parse the status snapshot: {err}"),
+        }
+    }
+
+    fn on_input(&self, event: &InputEvent) {
+        input::inject(event);
+        // Input flows at pointer rate; only state-changing events warrant a
+        // repaint (`remote_active` changes also arrive through `on_status`).
+        if matches!(event, InputEvent::Enter { .. } | InputEvent::ReleaseAll) {
+            self.request_repaint();
+        }
+    }
+
+    fn on_clipboard(&self, text: &str) {
+        clipboard::set_from_peer(&self.fingerprint, text);
+    }
+
+    fn on_notice(&self, notice_json: &str) {
+        let wire = serde_json::from_str::<NoticeWire>(notice_json).unwrap_or_else(|_| NoticeWire {
+            kind: "info".to_string(),
+            message: notice_json.to_string(),
+        });
+        let notice = Notice {
+            kind: wire.kind,
+            message: wire.message,
+            at: Instant::now(),
+        };
+        let mut notices = self.notices.lock();
+        notices.push_back(notice);
+        while notices.len() > NOTICE_HISTORY {
+            notices.pop_front();
+        }
+        drop(notices);
+        self.request_repaint();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Application
+// ---------------------------------------------------------------------------
+
+/// Pages of the main window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    Server,
+    Client,
+    Settings,
+}
+
+/// The hotkey being edited on the settings page.
+#[derive(Clone, Copy, Debug, Default)]
+struct HotkeyDraft {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    meta: bool,
+    usage: Option<u16>,
+    /// True while waiting for the user to press the key.
+    listening: bool,
+}
+
+impl HotkeyDraft {
+    fn from_hotkey(hotkey: Hotkey) -> Self {
+        HotkeyDraft {
+            ctrl: hotkey.modifiers & Modifiers::CTRL != 0,
+            alt: hotkey.modifiers & Modifiers::ALT != 0,
+            shift: hotkey.modifiers & Modifiers::SHIFT != 0,
+            meta: hotkey.modifiers & Modifiers::META != 0,
+            usage: Some(hotkey.usage),
+            listening: false,
+        }
+    }
+
+    fn modifiers(self) -> u8 {
+        let mut bits = 0u8;
+        if self.ctrl {
+            bits |= Modifiers::CTRL;
+        }
+        if self.alt {
+            bits |= Modifiers::ALT;
+        }
+        if self.shift {
+            bits |= Modifiers::SHIFT;
+        }
+        if self.meta {
+            bits |= Modifiers::META;
+        }
+        bits
+    }
+
+    /// A hotkey needs at least one modifier and a key.
+    fn is_complete(self) -> bool {
+        self.modifiers() != 0 && self.usage.is_some()
+    }
+}
+
+/// The eframe application.
+struct WinApp {
+    shared: Arc<AppShared>,
+    engine: Arc<Engine>,
+    capture: Option<input::CaptureHandle>,
+    tray: Option<tray::TrayHandle>,
+    tray_rx: Receiver<TrayCommand>,
+    config_dir: PathBuf,
+
+    // --- window / navigation ---------------------------------------------
+    page: Page,
+    onboarding: bool,
+    quitting: bool,
+    cleaned_up: bool,
+    /// Set when the window starts hidden but there is no tray to restore it.
+    force_show: bool,
+    dark_mode: bool,
+
+    // --- onboarding -------------------------------------------------------
+    pending_mode: Option<Mode>,
+    device_name_edit: String,
+
+    // --- server / client --------------------------------------------------
+    qr: Option<flowlink_core::qr::QrMatrix>,
+    qr_at: Option<Instant>,
+    qr_code: Option<String>,
+    manual_addr: String,
+    link_edit: String,
+    pair_code_edit: String,
+
+    // --- settings ---------------------------------------------------------
+    port_edit: String,
+    hotkey_draft: HotkeyDraft,
+    autostart_state: bool,
+
+    /// Short-lived confirmation shown in the footer ("Saved").
+    flash: Option<(String, Instant)>,
+    /// Last values pushed into the tray menu (avoid per-frame churn).
+    last_tray_state: Option<(bool, bool)>,
+}
+
+impl WinApp {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        shared: Arc<AppShared>,
+        engine: Arc<Engine>,
+        capture: input::CaptureHandle,
+        tray_rx: Receiver<TrayCommand>,
+        tray_tx: Sender<TrayCommand>,
+        config_dir: PathBuf,
+        onboarded: bool,
+        start_hidden: bool,
+    ) -> Result<Self> {
+        theme::install(&cc.egui_ctx);
+        shared.set_ctx(cc.egui_ctx.clone());
+
+        // The first status push has not happened yet, so the initial UI state
+        // comes straight from the engine's configuration (the same values the
+        // status will report moments later).
+        let (config_mode, config_port, config_name, config_hotkey) = {
+            let cfg = engine.cfg.lock();
+            (
+                cfg.mode,
+                cfg.listen_port,
+                cfg.device_name.clone(),
+                cfg.hotkey,
+            )
+        };
+        let mode_is_server = config_mode == Mode::Server;
+        let tray = match tray::install(&shared, tray_tx, mode_is_server, false) {
+            Ok(tray) => Some(tray),
+            Err(err) => {
+                warn!("system tray unavailable: {err:#}");
+                None
+            }
+        };
+        let has_tray = tray.is_some();
+
+        let page = if mode_is_server {
+            Page::Server
+        } else {
+            Page::Client
+        };
+
+        Ok(WinApp {
+            shared,
+            engine,
+            capture: Some(capture),
+            tray,
+            tray_rx,
+            config_dir,
+            page,
+            onboarding: !onboarded,
+            quitting: false,
+            cleaned_up: false,
+            force_show: start_hidden && !has_tray,
+            dark_mode: cc.egui_ctx.style().visuals.dark_mode,
+            pending_mode: if onboarded { None } else { Some(config_mode) },
+            device_name_edit: config_name,
+            qr: None,
+            qr_at: None,
+            qr_code: None,
+            manual_addr: String::new(),
+            link_edit: String::new(),
+            pair_code_edit: String::new(),
+            port_edit: config_port.to_string(),
+            hotkey_draft: HotkeyDraft::from_hotkey(config_hotkey),
+            autostart_state: autostart::is_enabled(),
+            flash: None,
+            last_tray_state: None,
+        })
+    }
+
+    // ---------------------------------------------------------------------
+    // Small helpers
+    // ---------------------------------------------------------------------
+
+    fn flash(&mut self, message: impl Into<String>) {
+        self.flash = Some((message.into(), Instant::now()));
+    }
+
+    fn marker_path(&self) -> PathBuf {
+        self.config_dir.join(ONBOARDED_MARKER)
+    }
+
+    /// Tell the core about the real screen geometry, then start.
+    ///
+    /// `ScreenInfo` defaults to 1920×1080, so this must happen before (or at
+    /// the same time as) every start for the edge math to line up.
+    fn start_engine(&self) {
+        self.engine
+            .execute(Cmd::SetLocalScreen(input::local_screen()));
+        self.engine.execute(Cmd::Start);
+        // Defensive: the hooks are always installed, but "Stop" pauses them.
+        input::set_capture_enabled(true);
+    }
+
+    /// Full shutdown: engine, hooks, clipboard poller, tray.
+    fn cleanup(&mut self) {
+        if self.cleaned_up {
+            return;
+        }
+        self.cleaned_up = true;
+        info!("shutting down");
+        self.engine.execute(Cmd::Shutdown);
+        input::shutdown();
+        clipboard::stop();
+        if let Some(capture) = self.capture.take() {
+            capture.stop();
+        }
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        self.cleanup();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        ctx.request_repaint();
+    }
+
+    fn show_window(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    /// Drain tray commands (posted from the tray's event thread).
+    fn pump_tray(&mut self, ctx: &egui::Context) {
+        while let Ok(command) = self.tray_rx.try_recv() {
+            match command {
+                TrayCommand::Show => self.show_window(ctx),
+                TrayCommand::ModeServer | TrayCommand::ModeClient => {
+                    let mode = if command == TrayCommand::ModeServer {
+                        Mode::Server
+                    } else {
+                        Mode::Client
+                    };
+                    self.engine.execute(Cmd::SetMode(mode));
+                    self.start_engine();
+                    self.page = if mode == Mode::Server {
+                        Page::Server
+                    } else {
+                        Page::Client
+                    };
+                    if let Some(tray) = &self.tray {
+                        tray.set_mode(mode == Mode::Server);
+                        tray.set_running(true);
+                    }
+                }
+                TrayCommand::Start => {
+                    self.start_engine();
+                    if let Some(tray) = &self.tray {
+                        tray.set_running(true);
+                    }
+                }
+                TrayCommand::Stop => {
+                    self.engine.execute(Cmd::Stop);
+                    input::set_capture_enabled(false);
+                    if let Some(tray) = &self.tray {
+                        tray.set_running(false);
+                    }
+                }
+                TrayCommand::Quit => {
+                    self.quit(ctx);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Closing the window hides it in the tray; only "Quit" really exits.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if self.quitting || self.tray.is_none() {
+            // Nothing to hide into — let the app end, but clean up first.
+            self.cleanup();
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    /// Regenerate the pairing QR when the code changed or the cache is stale.
+    fn refresh_qr(&mut self, status: &StatusMirror) {
+        let visible = !self.onboarding && self.page == Page::Server && status.is_server();
+        if !visible {
+            return;
+        }
+        let code = status
+            .pairing
+            .as_ref()
+            .and_then(|pairing| pairing.code.clone());
+        let due = self.qr_at.map_or(true, |at| at.elapsed() >= QR_REFRESH);
+        if !due && code == self.qr_code {
+            return;
+        }
+        self.qr = self.engine.pairing_qr().ok();
+        self.qr_code = code;
+        self.qr_at = Some(Instant::now());
+    }
+
+    /// Keep the edit buffers aligned with the engine (unless the user is
+    /// mid-edit: the buffers are only filled while they are untouched).
+    fn sync_edit_buffers(&mut self, status: &StatusMirror) {
+        if self.device_name_edit.is_empty() && !status.local.name.is_empty() {
+            self.device_name_edit = status.local.name.clone();
+        }
+        if self.port_edit.is_empty() && status.local.port != 0 {
+            self.port_edit = status.local.port.to_string();
+        }
+    }
+
+    /// Capture the next key press while the hotkey recorder is armed.
+    fn handle_hotkey_recorder(&mut self, ctx: &egui::Context) {
+        if !self.hotkey_draft.listening {
+            return;
+        }
+        let pressed = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key, pressed: true, ..
+                } => Some(*key),
+                _ => None,
+            })
+        });
+        if let Some(key) = pressed {
+            if let Some(usage) = egui_key_to_hid(key) {
+                self.hotkey_draft.usage = Some(usage);
+                self.hotkey_draft.listening = false;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Header / footer
+    // ---------------------------------------------------------------------
+
+    fn header(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("FlowLink")
+                    .size(20.0)
+                    .strong()
+                    .color(theme.accent),
+            );
+            ui.label(
+                egui::RichText::new(format!("v{}", status.version))
+                    .size(11.0)
+                    .color(theme.text_dim),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.state_pill(ui, theme, status);
+            });
+        });
+
+        if self.onboarding {
+            return;
+        }
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.page, Page::Server, "Server");
+            ui.selectable_value(&mut self.page, Page::Client, "Client");
+            ui.selectable_value(&mut self.page, Page::Settings, "Settings");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mode = if status.is_server() {
+                    "server"
+                } else {
+                    "client"
+                };
+                ui.label(
+                    egui::RichText::new(format!("mode: {mode}"))
+                        .size(11.0)
+                        .color(theme.text_dim),
+                );
+            });
+        });
+    }
+
+    fn state_pill(&self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        let color = state_color(theme, status.state);
+        let label = match status.state {
+            ConnStateMirror::Reconnecting => match status.reconnect_in_ms {
+                Some(ms) => format!("Reconnecting in {}s", ms / 1000 + 1),
+                None => "Reconnecting…".to_string(),
+            },
+            ConnStateMirror::Connected => match &status.peer {
+                Some(peer) => format!("Connected to {}", peer.name),
+                None => "Connected".to_string(),
+            },
+            other => state_label(other).to_string(),
+        };
+        egui::Frame::default()
+            .fill(color.gamma_multiply(0.16))
+            .corner_radius(egui::CornerRadius::same(9))
+            .inner_margin(egui::Margin::symmetric(10, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 4.0_f32, color);
+                    ui.label(egui::RichText::new(label).size(12.0).color(color));
+                });
+            });
+    }
+
+    fn footer(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let notices = self.shared.notices();
+        let flash = self
+            .flash
+            .as_ref()
+            .map(|(message, at)| (message.clone(), *at));
+        if let Some((message, at)) = flash {
+            if at.elapsed() < Duration::from_secs(4) {
+                ui.colored_label(theme.accent, message);
+                return;
+            }
+            self.flash = None;
+        }
+        // Transient notices fade after a while; errors stay until dismissed.
+        let latest = notices
+            .last()
+            .filter(|notice| notice.kind == "error" || notice.at.elapsed() < NOTICE_LIFETIME);
+        let Some(latest) = latest else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                notice_color(theme, &latest.kind),
+                format!("{}: {}", latest.kind, latest.message),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Dismiss").clicked() {
+                    self.shared.clear_notices();
+                }
+            });
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Onboarding
+    // ---------------------------------------------------------------------
+
+    fn onboarding_page(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Welcome to FlowLink")
+                .size(24.0)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(
+                "Share one keyboard, mouse and clipboard between this PC and your Mac.",
+            )
+            .color(theme.text_dim),
+        );
+        ui.add_space(10.0);
+
+        ui.label(egui::RichText::new("What role does this computer play?").strong());
+        ui.add_space(4.0);
+
+        let card_width = (ui.available_width() - 10.0) / 2.0;
+        let mut chosen = self.pending_mode;
+        ui.horizontal(|ui| {
+            if mode_card(
+                ui,
+                theme,
+                card_width,
+                "🖥",
+                "This computer drives the others",
+                "Server — your keyboard and mouse move to the Mac at the screen edge.",
+                self.pending_mode == Some(Mode::Server),
+            )
+            .clicked()
+            {
+                chosen = Some(Mode::Server);
+            }
+            if mode_card(
+                ui,
+                theme,
+                card_width,
+                "💻",
+                "This computer is controlled",
+                "Client — the Mac takes over this screen; connect to it afterwards.",
+                self.pending_mode == Some(Mode::Client),
+            )
+            .clicked()
+            {
+                chosen = Some(Mode::Client);
+            }
+        });
+        self.pending_mode = chosen;
+
+        ui.add_space(10.0);
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Device name").strong());
+            ui.label(
+                egui::RichText::new("How this computer appears on the other machine.")
+                    .size(11.0)
+                    .color(theme.text_dim),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.device_name_edit)
+                    .hint_text("e.g. Office PC")
+                    .desired_width(f32::INFINITY),
+            );
+        });
+
+        ui.add_space(10.0);
+        let ready = self.pending_mode.is_some() && !self.device_name_edit.trim().is_empty();
+        ui.add_enabled_ui(ready, |ui| {
+            let button = egui::Button::new(
+                egui::RichText::new("Start")
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            )
+            .fill(theme.accent)
+            .corner_radius(egui::CornerRadius::same(10))
+            .min_size(egui::vec2(ui.available_width(), 34.0));
+            if ui.add(button).clicked() {
+                self.finish_onboarding();
+            }
+        });
+        if !ready {
+            ui.label(
+                egui::RichText::new("Pick a role and give this computer a name to continue.")
+                    .size(11.0)
+                    .color(theme.text_dim),
+            );
+        }
+    }
+
+    fn finish_onboarding(&mut self) {
+        let Some(mode) = self.pending_mode else {
+            return;
+        };
+        let name = self.device_name_edit.trim().to_string();
+        if !name.is_empty() {
+            self.engine.execute(Cmd::SetDeviceName(name));
+        }
+        self.engine.execute(Cmd::SetMode(mode));
+        self.start_engine();
+        // Remember that onboarding is done (a plain marker file; the core's
+        // config has no onboarding flag of its own).
+        if let Err(err) = std::fs::write(self.marker_path(), b"1") {
+            warn!("could not write {}: {err}", self.marker_path().display());
+        }
+        self.onboarding = false;
+        self.page = if mode == Mode::Server {
+            Page::Server
+        } else {
+            Page::Client
+        };
+        if let Some(tray) = &self.tray {
+            tray.set_mode(mode == Mode::Server);
+            tray.set_running(true);
+        }
+        self.flash("Ready — FlowLink is now running.");
+    }
+
+    // ---------------------------------------------------------------------
+    // Server dashboard
+    // ---------------------------------------------------------------------
+
+    fn server_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        // --- pairing ------------------------------------------------------
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Pairing").strong());
+            let code = status
+                .pairing
+                .as_ref()
+                .and_then(|pairing| pairing.code.as_deref());
+            match code {
+                Some(code) => {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format_code(code))
+                                .monospace()
+                                .size(30.0)
+                                .color(theme.accent),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("New code").clicked() {
+                                self.engine.execute(Cmd::RegeneratePairCode);
+                                self.qr_at = None;
+                            }
+                        });
+                    });
+                    let mut details = Vec::new();
+                    if let Some(pairing) = &status.pairing {
+                        if pairing.expires_in_ms > 0 {
+                            details
+                                .push(format!("expires in {}s", pairing.expires_in_ms / 1000 + 1));
+                        }
+                        details.push(format!("{} attempts left", pairing.attempts_left));
+                    }
+                    if !details.is_empty() {
+                        ui.label(
+                            egui::RichText::new(details.join(" · "))
+                                .size(11.0)
+                                .color(theme.text_dim),
+                        );
+                    }
+                }
+                None => {
+                    ui.label(egui::RichText::new("No pairing code yet.").color(theme.text_dim));
+                    if ui.button("Generate code").clicked() {
+                        self.engine.execute(Cmd::RegeneratePairCode);
+                        self.qr_at = None;
+                    }
+                }
+            }
+
+            if let Some(qr) = &self.qr {
+                ui.add_space(6.0);
+                draw_qr(ui, qr);
+            }
+
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Invite link (scan the QR or paste this on the Mac)")
+                    .size(11.0)
+                    .color(theme.text_dim),
+            );
+            ui.horizontal(|ui| {
+                let link = self.engine.invite_link();
+                let text = egui::RichText::new(&link).size(10.0).monospace();
+                ui.label(text);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(link);
+                        self.flash("Invite link copied");
+                    }
+                });
+            });
+        });
+
+        ui.add_space(10.0);
+
+        // --- edge ---------------------------------------------------------
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Screen edge").strong());
+            ui.label(
+                egui::RichText::new("Push the pointer through this edge to control the peer.")
+                    .size(11.0)
+                    .color(theme.text_dim),
+            );
+            ui.add_space(4.0);
+            let current = status.edge();
+            ui.horizontal(|ui| {
+                for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+                    let selected = current == edge;
+                    let label = match edge {
+                        Edge::Left => "◀ Left",
+                        Edge::Right => "Right ▶",
+                        Edge::Top => "▲ Top",
+                        Edge::Bottom => "▼ Bottom",
+                    };
+                    if ui.selectable_label(selected, label).clicked() && !selected {
+                        self.engine.execute(Cmd::SetEdge(edge));
+                    }
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
+        // --- peer / control ----------------------------------------------
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Connected device").strong());
+            match &status.peer {
+                Some(peer) => {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&peer.name).size(15.0).strong());
+                        ui.label(
+                            egui::RichText::new(if peer.paired { "paired" } else { "unverified" })
+                                .size(11.0)
+                                .color(if peer.paired { theme.ok } else { theme.warn }),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} · RTT {:.1} ms · since {}",
+                            peer.addr,
+                            status.metrics.rtt_ms,
+                            human_duration(
+                                flowlink_core::util::now_ms().saturating_sub(peer.since_ms)
+                            )
+                        ))
+                        .size(11.0)
+                        .color(theme.text_dim),
+                    );
+                }
+                None => {
+                    let message = if status.listening {
+                        "Listening for a client on the local network…"
+                    } else {
+                        "Not connected."
+                    };
+                    ui.label(egui::RichText::new(message).color(theme.text_dim));
+                }
+            }
+
+            ui.add_space(6.0);
+            let mut control = status.remote_active;
+            if ui
+                .checkbox(&mut control, "Keyboard & mouse control")
+                .changed()
+            {
+                self.toggle_remote_control(status);
+            }
+            let hint = if status.remote_active {
+                format!(
+                    "Controlling the peer now — {} or the edge brings it back",
+                    hotkey_label(status.hotkey)
+                )
+            } else {
+                format!(
+                    "Toggle with {} or by pushing the pointer through the edge",
+                    hotkey_label(status.hotkey)
+                )
+            };
+            ui.label(egui::RichText::new(hint).size(11.0).color(theme.text_dim));
+        });
+
+        ui.add_space(10.0);
+        metrics_card(ui, theme, status);
+    }
+
+    // ---------------------------------------------------------------------
+    // Client dashboard
+    // ---------------------------------------------------------------------
+
+    fn client_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        // --- connection state --------------------------------------------
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Connection").strong());
+            match &status.peer {
+                Some(peer) if status.state == ConnStateMirror::Connected => {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&peer.name).size(15.0).strong());
+                        ui.label(
+                            egui::RichText::new(peer.addr.clone())
+                                .size(11.0)
+                                .color(theme.text_dim),
+                        );
+                    });
+                }
+                _ => {
+                    ui.label(
+                        egui::RichText::new(state_label(status.state))
+                            .color(state_color(theme, status.state)),
+                    );
+                }
+            }
+            if let Some(error) = &status.error {
+                ui.label(egui::RichText::new(error).size(11.0).color(theme.err));
+            }
+            if let Some(ms) = status.reconnect_in_ms {
+                ui.label(
+                    egui::RichText::new(format!("Retrying in {}s", ms / 1000 + 1))
+                        .size(11.0)
+                        .color(theme.text_dim),
+                );
+            }
+            if status.remote_active {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "The peer is driving this screen — push the pointer back through the {} edge, or press {}",
+                        status
+                            .remote_edge
+                            .map(|edge| {
+                                // `remote_edge` is the *server* edge; the local
+                                // one to push through is its mirror image.
+                                flowlink_core::edge::return_edge(edge).as_str()
+                            })
+                            .unwrap_or("screen"),
+                        hotkey_label(status.hotkey)
+                    ))
+                    .size(11.0)
+                    .color(theme.warn),
+                );
+                if ui.button("Take back control").clicked() {
+                    self.engine.execute(Cmd::RequestControl);
+                }
+            }
+            if status.is_running() && ui.button("Disconnect").clicked() {
+                self.engine.execute(Cmd::Disconnect);
+            }
+        });
+
+        ui.add_space(10.0);
+
+        // --- pairing code entry ------------------------------------------
+        let awaiting = status
+            .pairing
+            .as_ref()
+            .map(|pairing| pairing.awaiting_input)
+            .unwrap_or(false)
+            || status.state == ConnStateMirror::AwaitingPair;
+        if awaiting {
+            card(ui, theme, |ui| {
+                ui.label(egui::RichText::new("Enter the pairing code").strong());
+                ui.label(
+                    egui::RichText::new("The code is shown on the server's screen.")
+                        .size(11.0)
+                        .color(theme.text_dim),
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.pair_code_edit)
+                            .hint_text("123456")
+                            .desired_width(110.0),
+                    );
+                    if ui.button("Pair").clicked() {
+                        let code = self.pair_code_edit.trim().to_string();
+                        if !code.is_empty() {
+                            self.engine.execute(Cmd::SubmitPairCode(code));
+                            self.pair_code_edit.clear();
+                        }
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        }
+
+        // --- discovered servers ------------------------------------------
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Servers on this network").strong());
+            let servers: Vec<&DeviceMirror> = status
+                .discovered
+                .iter()
+                .filter(|device| matches!(device.role, Some(Mode::Server) | None))
+                .collect();
+            if servers.is_empty() {
+                ui.label(
+                    egui::RichText::new("Searching… make sure the server is running.")
+                        .size(11.0)
+                        .color(theme.text_dim),
+                );
+            }
+            for device in servers {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(&device.name).strong());
+                        let addr = device
+                            .addr
+                            .clone()
+                            .unwrap_or_else(|| "unknown address".to_string());
+                        let version = device.version.clone().unwrap_or_else(|| "?".to_string());
+                        ui.label(
+                            egui::RichText::new(format!("{addr} · v{version}"))
+                                .size(11.0)
+                                .color(theme.text_dim),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Connect").clicked() {
+                            self.connect_to(
+                                device.addr.as_deref(),
+                                device.port,
+                                Some(device.fingerprint.as_str()),
+                            );
+                        }
+                    });
+                });
+            }
+        });
+
+        ui.add_space(10.0);
+
+        // --- manual address / link ---------------------------------------
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Connect manually").strong());
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.manual_addr)
+                        .hint_text("192.168.1.42[:24800]")
+                        .desired_width(f32::INFINITY),
+                );
+                if ui.button("Connect").clicked() {
+                    match parse_host_port(&self.manual_addr) {
+                        Some((host, port)) => {
+                            self.engine.execute(Cmd::Connect {
+                                host,
+                                port,
+                                code: None,
+                                fingerprint: None,
+                            });
+                            self.flash("Connecting…");
+                        }
+                        None => self.flash("Enter an address like 192.168.1.42:24800"),
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Or paste a flowlink:// invite link")
+                    .size(11.0)
+                    .color(theme.text_dim),
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.link_edit)
+                        .hint_text("flowlink://connect?h=…")
+                        .desired_width(f32::INFINITY),
+                );
+                if ui.button("Open").clicked() {
+                    let link = self.link_edit.trim().to_string();
+                    if !link.is_empty() {
+                        self.engine.execute(Cmd::ConnectLink(link));
+                        self.link_edit.clear();
+                        self.flash("Connecting…");
+                    }
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
+        // --- remembered servers ------------------------------------------
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Remembered servers").strong());
+            if status.paired_devices.is_empty() {
+                ui.label(
+                    egui::RichText::new("Nothing remembered yet.")
+                        .size(11.0)
+                        .color(theme.text_dim),
+                );
+            }
+            for device in &status.paired_devices {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(&device.name).strong());
+                        ui.label(
+                            egui::RichText::new(
+                                device.last_addr.clone().unwrap_or_else(|| "—".to_string()),
+                            )
+                            .size(11.0)
+                            .color(theme.text_dim),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Forget").clicked() {
+                            self.engine.execute(Cmd::ForgetDevice(device.id.clone()));
+                        }
+                        ui.add_enabled_ui(device.last_addr.is_some(), |ui| {
+                            if ui.button("Connect").clicked() {
+                                self.connect_to(
+                                    device.last_addr.as_deref(),
+                                    flowlink_core::config::DEFAULT_PORT,
+                                    Some(device.fingerprint.as_str()),
+                                );
+                            }
+                        });
+                    });
+                });
+            }
+        });
+
+        ui.add_space(10.0);
+        metrics_card(ui, theme, status);
+    }
+
+    /// Ask the engine to toggle remote control — the same code path the
+    /// hotkey takes, so the core stays the single owner of the decision (it
+    /// also reports "not connected" itself).
+    fn toggle_remote_control(&self, status: &StatusMirror) {
+        self.engine.execute(Cmd::HostInput(HostInput::Key {
+            usage: status.hotkey.usage,
+            down: true,
+            modifiers: Modifiers::from_bits(status.hotkey.modifiers),
+        }));
+    }
+
+    /// Issue a `Connect` command for a discovered or remembered device.
+    ///
+    /// `address` is whatever the device announced (`host` or `host:port`); the
+    /// announced `fallback_port` is used when it does not carry one.
+    fn connect_to(&mut self, address: Option<&str>, fallback_port: u16, fingerprint: Option<&str>) {
+        let Some(address) = address else {
+            self.flash("No address known for that device — use manual connect");
+            return;
+        };
+        let (host, port) = split_address(address, fallback_port);
+        self.engine.execute(Cmd::Connect {
+            host,
+            port,
+            code: None,
+            fingerprint: fingerprint.map(|value| value.to_string()),
+        });
+        self.flash("Connecting…");
+    }
+
+    // ---------------------------------------------------------------------
+    // Settings
+    // ---------------------------------------------------------------------
+
+    fn settings_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("This device").strong());
+            egui::Grid::new("device_settings")
+                .num_columns(2)
+                .spacing([12.0, 10.0])
+                .show(ui, |ui| {
+                    ui.label("Device name");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.device_name_edit)
+                                .desired_width(180.0),
+                        );
+                        if ui.button("Save").clicked() {
+                            let name = self.device_name_edit.trim().to_string();
+                            if name.is_empty() {
+                                self.flash("The device name must not be empty");
+                            } else {
+                                self.engine.execute(Cmd::SetDeviceName(name));
+                                self.flash("Device name saved");
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Listening port");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.port_edit).desired_width(80.0));
+                        if ui.button("Save").clicked() {
+                            match self.port_edit.trim().parse::<u16>() {
+                                Ok(port) if port > 0 => {
+                                    self.engine.execute(Cmd::SetListenPort(port));
+                                    self.flash("Port saved");
+                                }
+                                _ => self.flash("Enter a port between 1 and 65535"),
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Clipboard");
+                    let mut clipboard_enabled = status.clipboard_enabled;
+                    if ui
+                        .checkbox(&mut clipboard_enabled, "Sync clipboard text")
+                        .changed()
+                    {
+                        self.engine
+                            .execute(Cmd::SetClipboardEnabled(clipboard_enabled));
+                        if clipboard_enabled {
+                            // Send whatever is on the clipboard from now on,
+                            // but do not resend what was already synced.
+                            self.shared.fingerprint().clear();
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Start with Windows");
+                    let mut autostart_enabled = self.autostart_state;
+                    if ui
+                        .checkbox(&mut autostart_enabled, "Launch at sign-in (tray)")
+                        .changed()
+                    {
+                        match std::env::current_exe() {
+                            Ok(exe) => {
+                                let result = if autostart_enabled {
+                                    autostart::enable(&exe)
+                                } else {
+                                    autostart::disable()
+                                };
+                                match result {
+                                    Ok(()) => {
+                                        self.autostart_state = autostart_enabled;
+                                        self.flash(if autostart_enabled {
+                                            "FlowLink will start with Windows"
+                                        } else {
+                                            "Autostart disabled"
+                                        });
+                                    }
+                                    Err(err) => {
+                                        warn!("autostart change failed: {err:#}");
+                                        self.flash(format!("Autostart failed: {err}"));
+                                    }
+                                }
+                            }
+                            Err(err) => self.flash(format!("Cannot locate the executable: {err}")),
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Theme");
+                    let mut dark = self.dark_mode;
+                    if ui.checkbox(&mut dark, "Dark mode").changed() {
+                        self.dark_mode = dark;
+                    }
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "ID {} · port {} · addrs {}",
+                    status.local.id,
+                    status.local.port,
+                    if status.local.addrs.is_empty() {
+                        "—".to_string()
+                    } else {
+                        status.local.addrs.join(", ")
+                    }
+                ))
+                .size(10.0)
+                .color(theme.text_dim),
+            );
+        });
+
+        ui.add_space(10.0);
+        self.hotkey_card(ui, theme, status);
+        ui.add_space(10.0);
+
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Files").strong());
+            ui.horizontal(|ui| {
+                if ui.button("Open logs folder").clicked() {
+                    let logs = flowlink_core::config::logs_dir(&self.config_dir);
+                    if let Err(err) = std::fs::create_dir_all(&logs) {
+                        warn!("could not create {}: {err}", logs.display());
+                    }
+                    open_in_explorer(&logs);
+                }
+                if ui.button("Reveal config").clicked() {
+                    open_in_explorer(&self.config_dir);
+                }
+                if ui.button("Copy fingerprint").clicked() {
+                    ui.ctx().copy_text(status.local.fingerprint.clone());
+                    self.flash("Fingerprint copied");
+                }
+            });
+            ui.label(
+                egui::RichText::new(self.config_dir.display().to_string())
+                    .size(10.0)
+                    .color(theme.text_dim),
+            );
+        });
+
+        ui.add_space(10.0);
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("About").strong());
+            ui.label(format!("FlowLink {}", status.version));
+            ui.label(
+                egui::RichText::new(
+                    "Close the window to keep FlowLink in the tray; use Quit to exit.",
+                )
+                .size(11.0)
+                .color(theme.text_dim),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Restart onboarding").clicked() {
+                    self.onboarding = true;
+                    self.pending_mode = status.mode;
+                }
+                if ui.button("Quit FlowLink").clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.quit(&ctx);
+                }
+            });
+        });
+    }
+
+    fn hotkey_card(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        card(ui, theme, |ui| {
+            ui.label(egui::RichText::new("Control hotkey").strong());
+            ui.label(
+                egui::RichText::new(format!(
+                    "Currently {} — used to toggle control on both machines.",
+                    hotkey_label(status.hotkey)
+                ))
+                .size(11.0)
+                .color(theme.text_dim),
+            );
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.hotkey_draft.ctrl, "Ctrl");
+                ui.checkbox(&mut self.hotkey_draft.alt, "Alt");
+                ui.checkbox(&mut self.hotkey_draft.shift, "Shift");
+                ui.checkbox(&mut self.hotkey_draft.meta, "Win");
+            });
+            ui.horizontal(|ui| {
+                if self.hotkey_draft.listening {
+                    ui.label(
+                        egui::RichText::new("Press a key…")
+                            .color(theme.accent)
+                            .strong(),
+                    );
+                    if ui.button("Cancel").clicked() {
+                        self.hotkey_draft.listening = false;
+                    }
+                } else {
+                    let key = self
+                        .hotkey_draft
+                        .usage
+                        .and_then(flowlink_core::hid::usage_name)
+                        .unwrap_or("unset");
+                    ui.label(format!("Key: {key}"));
+                    if ui.button("Record key").clicked() {
+                        self.hotkey_draft.listening = true;
+                    }
+                }
+                if ui.button("Apply").clicked() {
+                    if self.hotkey_draft.is_complete() {
+                        if let Some(usage) = self.hotkey_draft.usage {
+                            self.engine.execute(Cmd::SetHotkey(Hotkey {
+                                modifiers: self.hotkey_draft.modifiers(),
+                                usage,
+                            }));
+                            self.flash("Hotkey saved");
+                        }
+                    } else {
+                        self.flash("A hotkey needs at least one modifier and a key");
+                    }
+                }
+            });
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Frame
+    // ---------------------------------------------------------------------
+
+    fn update(&mut self, ctx: &egui::Context) {
+        self.pump_tray(ctx);
+        self.handle_close_request(ctx);
+
+        if !self.quitting {
+            if self.force_show {
+                self.force_show = false;
+                self.show_window(ctx);
+            }
+
+            // Theme switch (egui keeps the style between frames).
+            if self.dark_mode != ctx.style().visuals.dark_mode {
+                theme::apply(ctx, self.dark_mode);
+            }
+        }
+
+        let status = self.shared.snapshot_status();
+        if !self.quitting {
+            self.sync_edit_buffers(&status);
+            self.refresh_qr(&status);
+            self.handle_hotkey_recorder(ctx);
+
+            let tray_state = (status.is_server(), status.is_running());
+            if self.last_tray_state != Some(tray_state) {
+                if let Some(tray) = &self.tray {
+                    tray.set_mode(tray_state.0);
+                    tray.set_running(tray_state.1);
+                }
+                self.last_tray_state = Some(tray_state);
+            }
+        }
+
+        let theme = theme::theme_for(ctx);
+
+        egui::TopBottomPanel::top("flowlink_header")
+            .frame(
+                egui::Frame::default()
+                    .fill(theme.bg)
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
+            )
+            .show(ctx, |ui| self.header(ui, &theme, &status));
+
+        egui::TopBottomPanel::bottom("flowlink_footer")
+            .frame(
+                egui::Frame::default()
+                    .fill(theme.bg)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ctx, |ui| self.footer(ui, &theme));
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::default()
+                    .fill(theme.bg)
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
+            )
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.onboarding {
+                            self.onboarding_page(ui, &theme);
+                        } else {
+                            match self.page {
+                                Page::Server => self.server_page(ui, &theme, &status),
+                                Page::Client => self.client_page(ui, &theme, &status),
+                                Page::Settings => self.settings_page(ui, &theme, &status),
+                            }
+                        }
+                    });
+            });
+
+        // The pairing countdown and the "Connecting…" states are time-based.
+        if !self.quitting && !self.onboarding && self.page == Page::Server {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+    }
+}
+
+impl eframe::App for WinApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        WinApp::update(self, ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Backstop: covers exits that do not go through the Quit menu.
+        self.cleanup();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Build the engine, start the platform threads and run the UI.
+pub fn run() -> Result<()> {
+    let start_hidden = std::env::args().any(|arg| arg == "--autostart");
+
+    // Physical-pixel geometry must be settled before the hooks or the screen
+    // metrics are used.
+    input::init_process_dpi_awareness();
+
+    let shared = AppShared::new();
+    let config_dir = flowlink_core::config::default_config_dir();
+    let onboarded = config_dir.join(ONBOARDED_MARKER).exists();
+
+    let engine = Engine::new(config_dir.clone(), Arc::clone(&shared) as Arc<dyn Host>)
+        .context("starting the FlowLink engine")?;
+    shared.set_engine(Arc::clone(&engine));
+
+    // Platform threads. Hooks are essential: without them nothing works.
+    let capture = input::start(Arc::clone(&engine), shared.capture_state())
+        .context("starting input capture")?;
+    clipboard::spawn_poller(
+        Arc::clone(&engine),
+        shared.fingerprint(),
+        shared.capture_state(),
+    );
+
+    engine.execute(Cmd::SetLocalScreen(input::local_screen()));
+    if onboarded {
+        engine.execute(Cmd::Start);
+    } else {
+        info!("waiting for onboarding to complete");
+    }
+
+    let (tray_tx, tray_rx) = crossbeam_channel::unbounded();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("FlowLink")
+            .with_inner_size([420.0, 640.0])
+            .with_min_inner_size([380.0, 520.0])
+            .with_visible(!start_hidden),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "FlowLink",
+        options,
+        Box::new(move |cc| {
+            let app = WinApp::new(
+                cc,
+                Arc::clone(&shared),
+                Arc::clone(&engine),
+                capture,
+                tray_rx,
+                tray_tx,
+                config_dir,
+                onboarded,
+                start_hidden,
+            )?;
+            Ok(Box::new(app))
+        }),
+    )
+    .map_err(|err| anyhow::anyhow!("running the user interface: {err}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+/// A rounded card — the main layout primitive of the dashboards.
+fn card<R>(ui: &mut egui::Ui, theme: &Theme, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::default()
+        .fill(theme.card)
+        .stroke(egui::Stroke::new(1.0_f32, theme.border))
+        .corner_radius(egui::CornerRadius::same(theme::CARD_RADIUS))
+        .inner_margin(egui::Margin::same(14))
+        .show(ui, contents)
+        .inner
+}
+
+/// A selectable onboarding role card.
+fn mode_card(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    width: f32,
+    glyph: &str,
+    title: &str,
+    subtitle: &str,
+    selected: bool,
+) -> egui::Response {
+    let stroke = if selected {
+        egui::Stroke::new(2.0_f32, theme.accent)
+    } else {
+        egui::Stroke::new(1.0_f32, theme.border)
+    };
+    let fill = if selected {
+        theme.accent.gamma_multiply(0.14)
+    } else {
+        theme.card
+    };
+    let response = egui::Frame::default()
+        .fill(fill)
+        .stroke(stroke)
+        .corner_radius(egui::CornerRadius::same(theme::CARD_RADIUS))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width((width - 26.0).max(80.0));
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(glyph).size(22.0));
+                ui.label(egui::RichText::new(title).strong().size(13.0));
+                ui.label(
+                    egui::RichText::new(subtitle)
+                        .size(10.5)
+                        .color(theme.text_dim),
+                );
+            });
+        })
+        .response;
+    response.interact(egui::Sense::click())
+}
+
+/// Metrics strip shown at the bottom of both dashboards.
+fn metrics_card(ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+    let metrics = &status.metrics;
+    card(ui, theme, |ui| {
+        ui.label(egui::RichText::new("Traffic").strong());
+        ui.label(
+            egui::RichText::new(format!(
+                "RTT {:.1} ms · ↓ {} · ↑ {} · events {} in / {} out · up {}",
+                metrics.rtt_ms,
+                human_bytes(metrics.rx_bytes),
+                human_bytes(metrics.tx_bytes),
+                metrics.events_in,
+                metrics.events_out,
+                human_duration(metrics.uptime_ms),
+            ))
+            .size(11.0)
+            .color(theme.text_dim),
+        );
+    });
+}
+
+/// Draw a QR matrix: dark modules on a white quiet zone.
+///
+/// The module colour is fixed (not theme dependent) so scans work in both
+/// modes — a light-mode "dark" colour would be invisible on white.
+fn draw_qr(ui: &mut egui::Ui, matrix: &flowlink_core::qr::QrMatrix) {
+    const MODULE_DARK: egui::Color32 = egui::Color32::from_rgb(0x12, 0x14, 0x1B);
+    let side = ui.available_width().min(200.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 8.0_f32, egui::Color32::WHITE);
+
+    let modules = matrix.size as f32;
+    if modules <= 0.0 {
+        return;
+    }
+    let module = side / modules;
+    for y in 0..matrix.size {
+        for x in 0..matrix.size {
+            if !matrix.dark(x, y) {
+                continue;
+            }
+            let min = egui::pos2(
+                rect.left() + x as f32 * module,
+                rect.top() + y as f32 * module,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_size(min, egui::vec2(module, module)),
+                0.0_f32,
+                MODULE_DARK,
+            );
+        }
+    }
+}
+
+/// `123456` → `123 456` (easier to read out loud).
+fn format_code(code: &str) -> String {
+    if code.len() == 6 {
+        format!("{} {}", &code[..3], &code[3..])
+    } else {
+        code.to_string()
+    }
+}
+
+/// Human-readable hotkey chord, using the core's usage names.
+fn hotkey_label(hotkey: Hotkey) -> String {
+    let mut parts = Vec::new();
+    if hotkey.modifiers & Modifiers::CTRL != 0 {
+        parts.push("Ctrl".to_string());
+    }
+    if hotkey.modifiers & Modifiers::ALT != 0 {
+        parts.push("Alt".to_string());
+    }
+    if hotkey.modifiers & Modifiers::SHIFT != 0 {
+        parts.push("Shift".to_string());
+    }
+    if hotkey.modifiers & Modifiers::META != 0 {
+        parts.push("Win".to_string());
+    }
+    parts.push(
+        flowlink_core::hid::usage_name(hotkey.usage)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("0x{:02X}", hotkey.usage)),
+    );
+    parts.join(" + ")
+}
+
+fn state_color(theme: &Theme, state: ConnStateMirror) -> egui::Color32 {
+    match state {
+        ConnStateMirror::Off => theme.gray,
+        ConnStateMirror::Listening | ConnStateMirror::Connected => theme.ok,
+        ConnStateMirror::Error => theme.err,
+        _ => theme.warn,
+    }
+}
+
+fn state_label(state: ConnStateMirror) -> &'static str {
+    match state {
+        ConnStateMirror::Off => "Off",
+        ConnStateMirror::Listening => "Listening",
+        ConnStateMirror::Connecting => "Connecting…",
+        ConnStateMirror::Handshake => "Securing the connection…",
+        ConnStateMirror::AwaitingPair => "Waiting for the pairing code",
+        ConnStateMirror::Pairing => "Pairing…",
+        ConnStateMirror::Connected => "Connected",
+        ConnStateMirror::Reconnecting => "Reconnecting…",
+        ConnStateMirror::Error => "Error",
+    }
+}
+
+fn notice_color(theme: &Theme, kind: &str) -> egui::Color32 {
+    match kind {
+        "error" => theme.err,
+        "pairing" | "control" => theme.accent,
+        "connect" => theme.warn,
+        _ => theme.text_dim,
+    }
+}
+
+/// `host[:port]` → `(host, port)`, using `fallback_port` when the address
+/// carries none.
+fn split_address(address: &str, fallback_port: u16) -> (String, u16) {
+    match address.rsplit_once(':') {
+        Some((host, port)) => match port.trim().parse::<u16>() {
+            Ok(port) if !host.is_empty() && port > 0 => (host.to_string(), port),
+            _ => (address.to_string(), fallback_port),
+        },
+        None => (address.trim().to_string(), fallback_port),
+    }
+}
+
+/// `host[:port]` → `(host, port)`; the default port comes from the core.
+fn parse_host_port(input: &str) -> Option<(String, u16)> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.rsplit_once(':') {
+        Some((host, port)) => {
+            if host.is_empty() {
+                return None;
+            }
+            port.trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port > 0)
+                .map(|port| (host.to_string(), port))
+        }
+        None => Some((trimmed.to_string(), flowlink_core::config::DEFAULT_PORT)),
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn human_duration(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        let tenths = (ms % 1000) / 100;
+        format!("{seconds}.{tenths}s")
+    }
+}
+
+/// Translate an egui key into a USB HID usage id (hotkey recorder).
+///
+/// Only the keys that make sense as a hotkey are covered; egui cannot tell
+/// left from right modifiers, so the left variants are used.
+fn egui_key_to_hid(key: egui::Key) -> Option<u16> {
+    use egui::Key;
+    use flowlink_core::hid::usage;
+    Some(match key {
+        Key::A => usage::A,
+        Key::B => usage::B,
+        Key::C => usage::C,
+        Key::D => usage::D,
+        Key::E => usage::E,
+        Key::F => usage::F,
+        Key::G => usage::G,
+        Key::H => usage::H,
+        Key::I => usage::I,
+        Key::J => usage::J,
+        Key::K => usage::K,
+        Key::L => usage::L,
+        Key::M => usage::M,
+        Key::N => usage::N,
+        Key::O => usage::O,
+        Key::P => usage::P,
+        Key::Q => usage::Q,
+        Key::R => usage::R,
+        Key::S => usage::S,
+        Key::T => usage::T,
+        Key::U => usage::U,
+        Key::V => usage::V,
+        Key::W => usage::W,
+        Key::X => usage::X,
+        Key::Y => usage::Y,
+        Key::Z => usage::Z,
+        Key::Num0 => usage::NUM_0,
+        Key::Num1 => usage::NUM_1,
+        Key::Num2 => usage::NUM_2,
+        Key::Num3 => usage::NUM_3,
+        Key::Num4 => usage::NUM_4,
+        Key::Num5 => usage::NUM_5,
+        Key::Num6 => usage::NUM_6,
+        Key::Num7 => usage::NUM_7,
+        Key::Num8 => usage::NUM_8,
+        Key::Num9 => usage::NUM_9,
+        Key::F1 => usage::F1,
+        Key::F2 => usage::F2,
+        Key::F3 => usage::F3,
+        Key::F4 => usage::F4,
+        Key::F5 => usage::F5,
+        Key::F6 => usage::F6,
+        Key::F7 => usage::F7,
+        Key::F8 => usage::F8,
+        Key::F9 => usage::F9,
+        Key::F10 => usage::F10,
+        Key::F11 => usage::F11,
+        Key::F12 => usage::F12,
+        Key::Space => usage::SPACE,
+        Key::Enter => usage::ENTER,
+        Key::Escape => usage::ESCAPE,
+        Key::Tab => usage::TAB,
+        Key::Backspace => usage::BACKSPACE,
+        Key::Insert => usage::INSERT,
+        Key::Delete => usage::DELETE,
+        Key::Home => usage::HOME,
+        Key::End => usage::END,
+        Key::PageUp => usage::PAGE_UP,
+        Key::PageDown => usage::PAGE_DOWN,
+        Key::ArrowLeft => usage::LEFT_ARROW,
+        Key::ArrowRight => usage::RIGHT_ARROW,
+        Key::ArrowUp => usage::UP_ARROW,
+        Key::ArrowDown => usage::DOWN_ARROW,
+        Key::Minus => usage::MINUS,
+        Key::Equals | Key::Plus => usage::EQUALS,
+        Key::Comma => usage::COMMA,
+        Key::Period => usage::PERIOD,
+        Key::Slash => usage::SLASH,
+        Key::Backslash => usage::BACKSLASH,
+        Key::Semicolon => usage::SEMICOLON,
+        Key::Quote => usage::QUOTE,
+        Key::Backtick => usage::BACKQUOTE,
+        Key::OpenBracket => usage::LEFT_BRACKET,
+        Key::CloseBracket => usage::RIGHT_BRACKET,
+        _ => return None,
+    })
+}
+
+/// Open a folder in Explorer (a non-zero exit status is normal for
+/// `explorer.exe`).
+fn open_in_explorer(path: &Path) {
+    if let Err(err) = std::process::Command::new("explorer").arg(path).spawn() {
+        warn!("could not open {}: {err}", path.display());
+    }
+}

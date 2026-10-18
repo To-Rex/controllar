@@ -1,0 +1,27 @@
+[package]
+name = "flowlink-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlowLink for Windows: native input hooks, SendInput injection, tray UI"
+
+[[bin]]
+name = "flowlink-win"
+path = "src/main.rs"
+
+[dependencies]
+flowlink-core = { path = "../flowlink-core" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+crossbeam-channel = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+eframe.workspace = true
+egui.workspace = true
+tray-icon.workspace = true
+arboard.workspace = true
+winreg.workspace = true

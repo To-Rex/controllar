@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust-core:
+    name: Rust core & tests
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Format check
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        continue-on-error: true
+      - name: Tests (unit + e2e)
+        run: cargo test --workspace
+
+  macos-app:
+    name: macOS app (Swift)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Build Rust static lib
+        run: |
+          export MACOSX_DEPLOYMENT_TARGET=13.0
+          cargo build --release --manifest-path rust/Cargo.toml -p flowlink-ffi
+          mkdir -p macos/Vendor
+          cp rust/target/release/libflowlink_ffi.a macos/Vendor/
+          cp rust/crates/flowlink-ffi/include/flowlink.h macos/Sources/CFlowLinkCore/include/flowlink.h
+      - name: Swift tests
+        working-directory: macos
+        run: swift test
+      - name: Build app bundle
+        run: ./scripts/build-macos.sh
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowLink-macos
+          path: dist/FlowLink.app
+          if-no-files-found: error
+
+  windows-app:
+    name: Windows app (Rust)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Check
+        run: cargo check --workspace
+      - name: Build
+        run: cargo build --release -p flowlink-win
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowLink-windows
+          path: rust/target/release/flowlink-win.exe
+          if-no-files-found: error

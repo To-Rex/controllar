@@ -421,7 +421,9 @@ public final class Injector {
             height: metrics.height,
             nowNanos: DispatchTime.now().uptimeNanoseconds
         ) else { return }
-        diag("HANDOFF edge=\(edge) along=\(String(format: "%.3f", along))")
+        diag(
+            "HANDOFF edge=\(edge) along=\(String(format: "%.3f", along)) pos=\(fmt(local)) d=(\(Int(dx.rounded())),\(Int(dy.rounded())))"
+        )
         onEdgeReturn?(edge, along)
     }
 

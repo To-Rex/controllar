@@ -120,12 +120,14 @@ decide who listens; input routing is symmetric:
   facing the peer). Pressing the hotkey on the focused side sends `Enter`
   instead, handing the cursor over.
 - **Injected-edge return:** when the physical mouse is on the other computer,
-  the focused side receives synthetic moves. Its injector watches them: after
-  `Enter` the pointer must travel 32 px inside, then 20 px of outward
-  overshoot at the peer-facing edge causes the shell to issue a local
-  `HandOff` command; the core (only if still focused and on that edge) sends
-  `Enter` back. One physical mouse can therefore cross the shared seam in
-  both directions with no hotkey.
+  the focused side receives synthetic moves. Its injector watches them:
+  after `Enter` the pointer must first travel 64 px inside (so an entry or a
+  twitch cannot bounce straight back), and only then an outward push of
+  20 px **while the pointer is actually at the peer-facing edge** causes the
+  shell to issue a local `HandOff` command. A single fast flick from
+  mid-screen cannot trigger it. The core (only if still focused and on that
+  edge) sends `Enter` back, so one physical mouse can cross the shared seam
+  in both directions with no hotkey.
 - Every focus change emits a local `ReleaseAll` so no key/button stays held.
 - At session start the **server** side is focused; the client begins by
   forwarding. A client that owned the cursor when the link dropped reclaims

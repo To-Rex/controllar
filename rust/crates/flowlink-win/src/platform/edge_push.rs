@@ -15,9 +15,12 @@ use flowlink_core::types::Edge;
 
 /// Distance from the peer-facing edge the pointer must reach after `Enter`
 /// before an outward push is accepted (the entry inset is 24 px).
-pub const REARM_MARGIN: f64 = 32.0;
+pub const REARM_MARGIN: f64 = 64.0;
 /// Outward distance accumulated at the edge that triggers the handoff.
 pub const PUSH_THRESHOLD: f64 = 20.0;
+/// The pointer must actually be this close to the facing edge before an
+/// overshoot counts; a single fast flick from mid-screen must not hand off.
+pub const CONTACT_MARGIN: f64 = 4.0;
 /// If a handoff never produced a new `Enter` (the session died), allow edge
 /// detection again after this long.
 pub const COOLDOWN_MS: u64 = 1_000;
@@ -111,6 +114,21 @@ impl EdgePushTracker {
         if inward >= REARM_MARGIN {
             self.armed = true;
             self.overshoot = 0.0;
+        }
+
+        // Only a push that starts *at* the seam counts. A fast flick from
+        // mid-screen can request a position past the edge in one event; the
+        // hardware cursor only reaches the edge, and a following event at the
+        // edge (still outward) may hand off.
+        let at_edge = match edge {
+            Edge::Left => x <= CONTACT_MARGIN,
+            Edge::Right => x >= max_x - CONTACT_MARGIN,
+            Edge::Top => y <= CONTACT_MARGIN,
+            Edge::Bottom => y >= max_y - CONTACT_MARGIN,
+        };
+        if !at_edge {
+            self.overshoot = 0.0;
+            return None;
         }
 
         let desired_x = x + dx;
@@ -236,6 +254,16 @@ mod tests {
         assert_eq!(t.feed(0.0, 500.0, -30.0, 0.0, W, H, 3), None);
         assert_eq!(t.feed(W - 300.0, 500.0, -10.0, 0.0, W, H, 4), None);
         assert!(t.feed(W - 1.0, 500.0, 30.0, 0.0, W, H, 5).is_some());
+    }
+
+    #[test]
+    fn a_fast_flick_from_mid_screen_does_not_hand_off() {
+        let mut t = armed_tracker(Edge::Right); // local facing edge = Left
+                                                // One event asks to travel far past the edge while the hardware
+                                                // cursor is still at x=300; that must not count.
+        assert_eq!(t.feed(300.0, 500.0, -2000.0, 0.0, W, H, 2), None);
+        // The cursor is now at the edge; a following outward event counts.
+        assert!(t.feed(0.0, 500.0, -30.0, 0.0, W, H, 3).is_some());
     }
 
     #[test]

@@ -16,7 +16,7 @@ tanishtiriladi va keyin o‘zaro eslab qolinadi.
 | **Bitta umumiy kursor** | Bir vaqtda bitta ekranda bo‘ladi; qaysi kompyuterda bo‘lsa, **o‘sha tomondagi** klaviatura/sichqoncha uni boshqaradi (server/client faqat kim tinglashi bilan farq qiladi). |
 | **Juftlik kodi** | Server ekranida ko‘rinadigan 6 xonali kod. 10 daqiqa amal qiladi, 5 marta xato kiritilsa yangilanadi. |
 | **Hotkey** | Kursorni bir kompyuterdan ikkinchisiga o‘tkazuvchi tugmalar birikmasi. Standart: `Ctrl + Alt + Space` (ikkala kompyuterda ham ishlaydi). |
-| **Chet (edge)** | Narigi kompyuterga qaragan ekran chegarasi. Bir marta sozlanadi — 0.3.1 da ikkinchi kompyuterga avtomatik sinxronlanadi. Kursor shu chetdan chiqsa, narigi ekranga o‘tadi. |
+| **Chet (edge)** | Narigi kompyuterga qaragan ekran chegarasi. Bir marta sozlanadi — 0.3.2 da ikkinchi kompyuterga avtomatik sinxronlanadi. Kursor shu chetdan chiqsa, narigi ekranga o‘tadi. |
 
 ## 2. Talablar
 
@@ -102,8 +102,13 @@ client avtomatik ulanadi (token orqali, kodsiz).
   o‘tkazadi. Aktiv bo‘lmagan tomonda bossangiz — kursor shu tomonga keladi;
   aktiv tomonda bossangiz — narigi tomonga ketadi. Tugmani bosib ushlab
   turish fokusni takror-takror almashtirmaydi.
+- **Chetga tasodifan urilish endi fokusni o‘g‘irlamaydi:** kursor avval
+  ekran ichiga kamida ~64 px kirib harakatlanishi, keyin chetda turib
+  tashqariga ~20 px bosilishi kerak. Mid-screen’dan tez siltanish (bir
+  eventda chetdan oshib ketish) fokusni qaytarmaydi. Qaytish uchun chetga
+  sekin surib, bir zum ushlab turing yoki `Ctrl + Alt + Space` bosing.
 - **Chetlarni sozlash (endi avtomatik):** **bitta** kompyuterda narigi
-  kompyuterga qaragan chetni tanlang (masalan Windows’da `Right`). 0.3.1
+  kompyuterga qaragan chetni tanlang (masalan Windows’da `Right`). 0.3.2
   o‘rnatilgan ikkala kompyuter bu chetni avtomatik sinxronlaydi va eslab
   qoladi — Mac’da qarama-qarshi tomon o‘zi tanlanadi. Kursor chetdan 24 px
   ichkarida paydo bo‘ladi, shuning uchun tasodifiy kichik harakat fokusni
@@ -127,18 +132,18 @@ client avtomatik ulanadi (token orqali, kodsiz).
 | **„Found on this network“ ro‘yxatida server ko‘rinmayapti** | Windows Firewall discovery (UDP 5353) ni bloklayapti yoki routerda „client isolation“ yoqilgan. Yechim: serverdagi **NETWORK** kartasidagi manzilni (masalan `192.168.1.50:24800`) clientda **Connect manually**ga kiriting — bu har doim ishlaydi. |
 | **Umuman ulanmayapti (Wi-Fi ↔ Ethernet)** | Ikkala kompyuter **bitta router/tarmoqda** bo‘lishi kerak. Birinchi tekshiruv: Windows’da `ipconfig` → `192.168.x.x`, Mac’da `ifconfig` → bir xil `192.168.x.*` bo‘lishi kerak. Windows’da firewall ruxsatini bajaring (yuqoriga qarang). |
 | Client serverni ko‘rmayapti | Ikkala kompyuter bir tarmoqda ekaniga ishonch hosil qiling; server rejimida “Listening” holatida turishi kerak. Manuel IP bilan urinib ko‘ring. |
-| **Mac → Windows tomon kursor o‘tmayapti (hotkey ham, chekka ham ishlamayapti)** | 1) macOS event tap ishlamayapti — ruxsat yo‘qolgan. System Settings → Privacy & Security’da **Accessibility** va **Input Monitoring**’da FlowLink’ni **OFF → ON** qilib qayta yoqing (dastur **har bir yangi build dan keyin** qayta ruxsat so‘raydi — macOS imzo o‘zgargani uchun). Ilova banner ko‘rsatadi; logda `local input capture is NOT active` va sababi yoziladi, `local input is reaching the engine` esa tap tirikligini tasdiqlaydi. 2) Agar logda `local input is reaching the engine` bo‘lsa-yu kursor o‘tmasa: ikkala kompyuterda ham **0.3.1** turganini tekshiring (Sozlamalar → versiya). 0.3.1 da chet avtomatik sinxronlanadi; eski 0.2.x da chetlar qo‘lda qarama-qarshi qilib sozlanishi shart edi. |
-| **Kursor faqat bitta tomonga o‘tadi** | 0.3.1 da bu tuzatildi: chet endi qurilmalar o‘rtasida sinxronlanadi, `Enter` orqali o‘zini tuzatadi va sintetik kursorning chetdan oshishi ham fokusni qaytaradi. Ikkala buildni yangilang va bir marta macOS ruxsatlarini OFF→ON qiling. |
+| **Mac → Windows tomon kursor o‘tmayapti (hotkey ham, chekka ham ishlamayapti)** | 1) macOS event tap ishlamayapti — ruxsat yo‘qolgan. System Settings → Privacy & Security’da **Accessibility** va **Input Monitoring**’da FlowLink’ni **OFF → ON** qilib qayta yoqing (dastur **har bir yangi build dan keyin** qayta ruxsat so‘raydi — macOS imzo o‘zgargani uchun). Ilova banner ko‘rsatadi; logda `local input capture is NOT active` va sababi yoziladi, `local input is reaching the engine` esa tap tirikligini tasdiqlaydi. 2) Agar logda `local input is reaching the engine` bo‘lsa-yu kursor o‘tmasa: ikkala kompyuterda ham **0.3.2** turganini tekshiring (Sozlamalar → versiya). 0.3.2 da chet avtomatik sinxronlanadi; eski 0.2.x da chetlar qo‘lda qarama-qarshi qilib sozlanishi shart edi. |
+| **Kursor faqat bitta tomonga o‘tadi** | 0.3.2 da bu tuzatildi: chet endi qurilmalar o‘rtasida sinxronlanadi, `Enter` orqali o‘zini tuzatadi va sintetik kursorning chetdan oshishi ham fokusni qaytaradi. Ikkala buildni yangilang va bir marta macOS ruxsatlarini OFF→ON qiling. |
 | Ruxsat so‘ralmagan / ishlmayapti | System Settings → Privacy & Security’da FlowLink’ga Accessibility va Input Monitoring bering (yuqoriga qarang), dasturni qayta ishga tushiring. |
-| Kursor to‘satdan eski o‘rniga qaytib ketmoqda / dastur ishlashdan to‘xtayapti | 0.3.1 da ikkita jiddiy qulf (deadlock) tuzatildi: (1) fokus/status yuborish tartibi; (2) tarmoqdagi qurilma ro‘yxati 15 soniyadan keyin tozalanganda engine o‘zini qulflab qo‘yardi — shu sababli dastur ishga tushgandan 15–30 soniya o‘tib “muzlab” qolardi. Endi eng uzoq 4 soniyada qayta ulanadi; bir xil qurilma “band” deb rad etilmaydi. Agar takrorlansa: logda `session closed:` sababini va `injector-diag.log` faylini yuboring. |
+| Kursor to‘satdan eski o‘rniga qaytib ketmoqda / dastur ishlashdan to‘xtayapti | 0.3.2 da ikkita jiddiy qulf (deadlock) tuzatildi: (1) fokus/status yuborish tartibi; (2) tarmoqdagi qurilma ro‘yxati 15 soniyadan keyin tozalanganda engine o‘zini qulflab qo‘yardi — shu sababli dastur ishga tushgandan 15–30 soniya o‘tib “muzlab” qolardi. Endi eng uzoq 4 soniyada qayta ulanadi; bir xil qurilma “band” deb rad etilmaydi. Agar takrorlansa: logda `session closed:` sababini va `injector-diag.log` faylini yuboring. |
 | Klaviatura ishlamayapti (macOS) | Parol maydonlari va Terminal’dagi *Secure Keyboard Entry* rejimida tizim sintetik klaviaturani bloklaydi — bu macOS cheklovi. |
 | Windows’da ba’zi dasturlar javob bermayapti | Administrator sifatida ochilgan oynalar (UAC doirasi) FlowLink’ni ham administrator qilib ishga tushirishni talab qiladi. Yangi versiya buni bir marta ogohlantiradi (`SendInput was blocked`). |
 | Kod eskirgan | Serverda “New code” tugmasini bosing (yoki 3 xato urinishdan keyin avtomatik yangilanadi). |
 | Log kerak bo‘lsa | Sozlamalar → Open logs folder yoki dastur ichidagi **Logs** sahifasi. |
 
-> **Muhim:** 0.3.1 da kursorning ikki tomonlama o‘tishi, klaviatura fokusi,
+> **Muhim:** 0.3.2 da kursorning ikki tomonlama o‘tishi, klaviatura fokusi,
 > chet sinxronizatsiyasi va qayta ulanish tuzatilgan. **Ikkala kompyuterda ham
-> 0.3.1** ishlayotganiga ishonch hosil qiling (Mac:
+> 0.3.2** ishlayotganiga ishonch hosil qiling (Mac:
 > `./scripts/build-macos.sh` → `dist/FlowLink.app`;
 > Windows: `cargo build --release -p flowlink-win`). macOS’da har bir yangi
 > build dan keyin Accessibility va Input Monitoring ruxsatlarini **OFF → ON**

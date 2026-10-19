@@ -13,10 +13,16 @@ import Foundation
 /// Kept free of CoreGraphics so it can be unit-tested deterministically.
 struct EdgePushTracker {
     /// Distance from the peer-facing edge the pointer must reach after
-    /// `Enter` before an outward push is accepted (the entry inset is 24 px).
-    static let rearmMargin: Double = 32
-    /// Outward distance accumulated at the edge that triggers the handoff.
+    /// `Enter` before an outward push is accepted. The entry lands 24 px
+    /// inside, so the user must move ~40 px into the screen first; a twitch
+    /// at the seam cannot hand focus back.
+    static let rearmMargin: Double = 64
+    /// Outward distance accumulated while the pointer is **at** the edge.
     static let pushThreshold: Double = 20
+    /// The pointer must actually be this close to the facing edge before an
+    /// overshoot counts. Without it a single fast flick from mid-screen could
+    /// jump past the edge in one event and hand focus back unexpectedly.
+    static let contactMargin: Double = 4
     /// A handoff that never produced a new `Enter` (the session died) must
     /// not disable edge detection forever.
     static let cooldownNanos: UInt64 = 1_000_000_000
@@ -91,6 +97,22 @@ struct EdgePushTracker {
             overshoot = 0
         }
 
+        // Only a push that starts *at* the seam counts. A fast movement from
+        // the middle of the screen may ask to go past the edge in a single
+        // event; the hardware cursor only reaches the edge, and the next
+        // event (still at the edge and still outward) can hand off.
+        let atEdge: Bool
+        switch edge {
+        case .left: atEdge = x <= Self.contactMargin
+        case .right: atEdge = x >= maxX - Self.contactMargin
+        case .top: atEdge = y <= Self.contactMargin
+        case .bottom: atEdge = y >= maxY - Self.contactMargin
+        }
+        guard atEdge else {
+            overshoot = 0
+            return nil
+        }
+
         let desiredX = x + dx
         let desiredY = y + dy
         let over: Double
@@ -101,8 +123,7 @@ struct EdgePushTracker {
         case .bottom: over = max(0, desiredY - maxY)
         }
         guard over > 0 else {
-            // Moving away from the edge: forget a partial push unless the
-            // pointer is still practically touching it.
+            // Moving away from the edge: forget a partial push.
             if inward > 2 { overshoot = 0 }
             return nil
         }

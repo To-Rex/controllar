@@ -299,3 +299,52 @@ final class EdgePushTrackerStatusTests: XCTestCase {
         ))
     }
 }
+
+final class EdgePushContactTests: XCTestCase {
+    private let width = 1920.0
+    private let height = 1080.0
+
+    func testFastFlickFromMidScreenDoesNotHandOff() {
+        var tracker = EdgePushTracker()
+        tracker.setPeerEdge(.left)
+        // Arm from a position well inside.
+        XCTAssertNil(tracker.feed(
+            x: 300, y: 500, dx: 10, dy: 0,
+            width: width, height: height, nowNanos: 1
+        ))
+        // A single event asking to jump far past the edge is ignored while
+        // the cursor is still at x=300.
+        XCTAssertNil(tracker.feed(
+            x: 300, y: 500, dx: -2000, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+        // The cursor is now at the edge; the next outward event counts.
+        XCTAssertNotNil(tracker.feed(
+            x: 0, y: 500, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 3
+        ))
+    }
+
+    func testEntryRunwayRequiresMovingInsideFirst() {
+        var tracker = EdgePushTracker()
+        tracker.enter(remoteEdge: .left) // local facing edge = right
+        // Enter landed 24 px inside; an immediate outward push must not fire.
+        XCTAssertNil(tracker.feed(
+            x: width - 24, y: 500, dx: 30, dy: 0,
+            width: width, height: height, nowNanos: 1
+        ))
+        XCTAssertNil(tracker.feed(
+            x: width - 1, y: 500, dx: 30, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+        // Move deep inside to arm, then cross.
+        XCTAssertNil(tracker.feed(
+            x: width - 300, y: 500, dx: -10, dy: 0,
+            width: width, height: height, nowNanos: 3
+        ))
+        XCTAssertNotNil(tracker.feed(
+            x: width - 1, y: 500, dx: 30, dy: 0,
+            width: width, height: height, nowNanos: 4
+        ))
+    }
+}

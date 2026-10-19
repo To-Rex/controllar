@@ -123,8 +123,8 @@ the cursor moves the remote cursor with synthetic events, which the local
 capture path deliberately ignores. Without more, that mouse could never push
 the cursor back. Both shells therefore run a small pure state machine
 (`EdgePushTracker`, implemented and unit-tested in Swift and Rust) over every
-injected move: after `Enter` the pointer must first travel 32 px inside, then
-20 px of outward overshoot at the peer-facing edge triggers
+injected move: after `Enter` the pointer must first travel 64 px inside, then
+20 px of outward overshoot *while the pointer is at the edge* triggers
 `Cmd::HandOff { edge, along }`. The shell also seeds the tracker from
 `Status::peer_edge`, so the server can detect the return even at session
 start, when it owns the cursor but has not received an `Enter` yet. The core

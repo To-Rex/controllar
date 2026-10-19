@@ -166,7 +166,7 @@ Details, threat model and explicit non-goals: [docs/SECURITY.md](docs/SECURITY.m
 ## Status
 
 v0.3 targets macOS 13+ and Windows 10+ in either role, one active peer per
-server. Update **both** computers to 0.3.1 to get automatic edge sync and
+server. Update **both** computers to 0.3.2 to get automatic edge sync and
 injected-cursor edge return; a 0.2.x peer still connects (protocol 2), but
 only gets the geometric fallback after the first handoff.
 

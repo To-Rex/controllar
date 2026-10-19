@@ -26,6 +26,7 @@ use flowlink_core::hid::usage;
 ///
 /// One row per physical key. Both directions ([`vk_to_hid`], [`hid_to_vk`])
 /// scan this table, which makes the mapping self-consistent by construction.
+#[cfg_attr(not(windows), allow(dead_code))]
 const KEY_TABLE: [(u16, u16); 103] = [
     // --- Letters: VK_A..VK_Z (0x41..=0x5A) → A..Z (0x04..=0x1D) -------------
     (0x41, usage::A),
@@ -143,6 +144,7 @@ const KEY_TABLE: [(u16, u16); 103] = [
 ];
 
 /// Translate a Windows virtual-key code into a USB HID usage id.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn vk_to_hid(vk: u16) -> Option<u16> {
     KEY_TABLE
         .iter()
@@ -151,6 +153,7 @@ pub fn vk_to_hid(vk: u16) -> Option<u16> {
 }
 
 /// Translate a USB HID usage id into a Windows virtual-key code.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn hid_to_vk(hid: u16) -> Option<u16> {
     KEY_TABLE
         .iter()

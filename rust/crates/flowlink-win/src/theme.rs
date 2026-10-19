@@ -11,14 +11,16 @@
 use egui::{Color32, CornerRadius, Stroke};
 
 /// Corner radius used for cards and grouped panels.
-pub const CARD_RADIUS: u8 = 12;
+pub const CARD_RADIUS: u8 = 14;
 /// Corner radius used for windows and popups.
 pub const WINDOW_RADIUS: u8 = 14;
 
 /// Start of the accent gradient (violet). Also used for the tray icon, which
 /// is painted without an egui context.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x5B, 0xFF);
 /// End of the accent gradient.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const ACCENT_2: Color32 = Color32::from_rgb(0x8B, 0x5C, 0xF6);
 
 /// The resolved palette for the current mode.
@@ -171,18 +173,36 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     widgets.open.corner_radius = CornerRadius::same(10);
 
     style.visuals = visuals;
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    style.spacing.interact_size.y = 24.0;
+    style.spacing.item_spacing = egui::vec2(8.0, 10.0);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.interact_size.y = 26.0;
+
+    // Type scale matched to the macOS app: 13.5 pt body, 19 pt titles,
+    // 11 pt captions.
+    use egui::{FontFamily, FontId, TextStyle};
+    style.text_styles = [
+        (
+            TextStyle::Heading,
+            FontId::new(19.0, FontFamily::Proportional),
+        ),
+        (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+        (
+            TextStyle::Monospace,
+            FontId::new(12.5, FontFamily::Monospace),
+        ),
+        (
+            TextStyle::Button,
+            FontId::new(13.5, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(11.0, FontFamily::Proportional),
+        ),
+    ]
+    .into();
 
     // Pin the preference to the explicit choice and install the palette for
     // exactly that theme, so egui cannot swap it for its built-in one.
     ctx.set_theme(egui_theme);
     ctx.set_style_of(egui_theme, style);
-}
-
-/// Install the theme using egui's current mode (called on startup).
-pub fn install(ctx: &egui::Context) {
-    let dark = ctx.style().visuals.dark_mode;
-    apply(ctx, dark);
 }

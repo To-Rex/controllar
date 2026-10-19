@@ -17,11 +17,14 @@ tracing.workspace = true
 anyhow.workspace = true
 parking_lot.workspace = true
 crossbeam-channel = "0.5"
+# The egui UI is cross-platform on purpose: it also powers the offscreen
+# preview/screenshot mode used to keep both shells visually identical.
+eframe.workspace = true
+egui.workspace = true
+image.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
-eframe.workspace = true
-egui.workspace = true
 tray-icon.workspace = true
 arboard.workspace = true
 winreg.workspace = true

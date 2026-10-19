@@ -65,6 +65,7 @@ windows = { version = "0.58", features = [
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "persistence"] }
 egui = "0.31"
 tray-icon = "0.19"
+image = { version = "0.25", default-features = false, features = ["png"] }
 arboard = "3"
 winreg = "0.52"
 

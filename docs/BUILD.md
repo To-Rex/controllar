@@ -72,6 +72,31 @@ Platform notes for the Windows shell are maintained in
 `rust/crates/flowlink-win/`; prefer those sources over this summary if the
 two ever disagree.
 
+### UI preview mode (any platform)
+
+The egui application is deliberately cross-platform: the window can be built
+and run on macOS/Linux with no-op platform integrations. This is how the
+Windows design is kept identical to the macOS one — both shells share the
+same tokens (`theme.rs` mirrors the SwiftUI design system) and the Windows
+pages can be inspected and screenshotted without a Windows machine:
+
+```sh
+cd rust
+cargo run -p flowlink-win -- \
+  --config-dir /tmp/flowlink-preview --preview-page server \
+  --screenshot /tmp/server.png          # renders one frame, writes PNG, exits
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--config-dir <dir>` | isolated config/identity/logs directory |
+| `--preview-page server\|client\|settings` | skip onboarding and open that page (server previews also start the engine so a real pairing code and QR are shown) |
+| `--preview-theme light\|dark` | force a theme instead of the system one |
+| `--screenshot <file>` | after ~1.5 s (engine settled) capture one frame, write it as PNG, quit |
+
+On Windows itself these flags are harmless and can also be used for
+screenshot-driven UI tests.
+
 ## Testing
 
 ```sh

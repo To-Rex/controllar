@@ -251,6 +251,7 @@ impl AppShared {
     ///
     /// Safe to call from any thread (the tray posts it when the window is
     /// hidden and the UI thread may not be running frames yet).
+    #[cfg_attr(not(windows), allow(dead_code))] // only the Windows tray calls this
     pub fn show_window(&self) {
         if let Some(ctx) = self.ctx.lock().as_ref() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -436,6 +437,12 @@ struct WinApp {
     flash: Option<(String, Instant)>,
     /// Last values pushed into the tray menu (avoid per-frame churn).
     last_tray_state: Option<(bool, bool)>,
+
+    // --- preview / screenshot mode (cross-platform design QA) -------------
+    /// When set, the app keeps repainting, captures one frame and quits.
+    screenshot: Option<PathBuf>,
+    screenshot_requested: bool,
+    screenshot_frames: u32,
 }
 
 impl WinApp {
@@ -450,8 +457,14 @@ impl WinApp {
         config_dir: PathBuf,
         onboarded: bool,
         start_hidden: bool,
+        initial_page: Option<Page>,
+        screenshot: Option<PathBuf>,
+        preview_theme: Option<bool>,
     ) -> Result<Self> {
-        theme::install(&cc.egui_ctx);
+        // Deterministic theme: an explicit preview theme wins, otherwise
+        // follow egui's current (system) mode.
+        let dark = preview_theme.unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
+        theme::apply(&cc.egui_ctx, dark);
         shared.set_ctx(cc.egui_ctx.clone());
 
         // The first status push has not happened yet, so the initial UI state
@@ -476,11 +489,11 @@ impl WinApp {
         };
         let has_tray = tray.is_some();
 
-        let page = if mode_is_server {
+        let page = initial_page.unwrap_or(if mode_is_server {
             Page::Server
         } else {
             Page::Client
-        };
+        });
 
         Ok(WinApp {
             shared,
@@ -494,7 +507,7 @@ impl WinApp {
             quitting: false,
             cleaned_up: false,
             force_show: start_hidden && !has_tray,
-            dark_mode: cc.egui_ctx.style().visuals.dark_mode,
+            dark_mode: dark,
             pending_mode: if onboarded { None } else { Some(config_mode) },
             device_name_edit: config_name,
             qr: None,
@@ -508,6 +521,9 @@ impl WinApp {
             autostart_state: autostart::is_enabled(),
             flash: None,
             last_tray_state: None,
+            screenshot,
+            screenshot_requested: false,
+            screenshot_frames: 0,
         })
     }
 
@@ -678,15 +694,17 @@ impl WinApp {
 
     fn header(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
         ui.horizontal(|ui| {
+            brand_glyph(ui, theme);
+            ui.add_space(2.0);
             ui.label(
                 egui::RichText::new("FlowLink")
-                    .size(20.0)
+                    .size(17.0)
                     .strong()
-                    .color(theme.accent),
+                    .color(theme.text),
             );
             ui.label(
                 egui::RichText::new(format!("v{}", status.version))
-                    .size(11.0)
+                    .size(10.5)
                     .color(theme.text_dim),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -698,24 +716,26 @@ impl WinApp {
             return;
         }
 
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.page, Page::Server, "Server");
-            ui.selectable_value(&mut self.page, Page::Client, "Client");
-            ui.selectable_value(&mut self.page, Page::Settings, "Settings");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mode = if status.is_server() {
-                    "server"
-                } else {
-                    "client"
-                };
-                ui.label(
-                    egui::RichText::new(format!("mode: {mode}"))
-                        .size(11.0)
-                        .color(theme.text_dim),
-                );
+        ui.add_space(8.0);
+        egui::Frame::default()
+            .fill(theme.card)
+            .stroke(egui::Stroke::new(1.0_f32, theme.border))
+            .corner_radius(egui::CornerRadius::same(9))
+            .inner_margin(egui::Margin::symmetric(3, 3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.horizontal(|ui| {
+                    for (page, label) in [
+                        (Page::Server, "Server"),
+                        (Page::Client, "Client"),
+                        (Page::Settings, "Settings"),
+                    ] {
+                        if tab_button(ui, theme, self.page == page, label).clicked() {
+                            self.page = page;
+                        }
+                    }
+                });
             });
-        });
     }
 
     fn state_pill(&self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
@@ -797,19 +817,21 @@ impl WinApp {
         );
         ui.add_space(10.0);
 
-        ui.label(egui::RichText::new("What role does this computer play?").strong());
+        card_title(ui, theme, "What role does this computer play?");
         ui.add_space(4.0);
 
         let card_width = (ui.available_width() - 10.0) / 2.0;
+        let card_height = 128.0;
         let mut chosen = self.pending_mode;
         ui.horizontal(|ui| {
             if mode_card(
                 ui,
                 theme,
                 card_width,
+                card_height,
                 "🖥",
-                "This computer drives the others",
-                "Server — your keyboard and mouse move to the Mac at the screen edge.",
+                "This computer drives",
+                "Server — its keyboard and mouse move to the Mac when the pointer crosses the screen edge.",
                 self.pending_mode == Some(Mode::Server),
             )
             .clicked()
@@ -820,8 +842,9 @@ impl WinApp {
                 ui,
                 theme,
                 card_width,
+                card_height,
                 "💻",
-                "This computer is controlled",
+                "This computer is driven",
                 "Client — the Mac takes over this screen; connect to it afterwards.",
                 self.pending_mode == Some(Mode::Client),
             )
@@ -832,14 +855,15 @@ impl WinApp {
         });
         self.pending_mode = chosen;
 
-        ui.add_space(10.0);
+        ui.add_space(12.0);
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Device name").strong());
+            card_title(ui, theme, "Computer name");
             ui.label(
                 egui::RichText::new("How this computer appears on the other machine.")
                     .size(11.0)
                     .color(theme.text_dim),
             );
+            ui.add_space(4.0);
             ui.add(
                 egui::TextEdit::singleline(&mut self.device_name_edit)
                     .hint_text("e.g. Office PC")
@@ -906,7 +930,7 @@ impl WinApp {
     fn server_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
         // --- pairing ------------------------------------------------------
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Pairing").strong());
+            card_title(ui, theme, "Pairing");
             let code = status
                 .pairing
                 .as_ref()
@@ -965,8 +989,11 @@ impl WinApp {
             );
             ui.horizontal(|ui| {
                 let link = self.engine.invite_link();
-                let text = egui::RichText::new(&link).size(10.0).monospace();
-                ui.label(text);
+                let text = egui::RichText::new(&link)
+                    .size(10.5)
+                    .monospace()
+                    .color(theme.text_dim);
+                ui.add(egui::Label::new(text).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Copy").clicked() {
                         ui.ctx().copy_text(link);
@@ -980,24 +1007,18 @@ impl WinApp {
 
         // --- edge ---------------------------------------------------------
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Screen edge").strong());
+            card_title(ui, theme, "Screen edge");
             ui.label(
                 egui::RichText::new("Push the pointer through this edge to control the peer.")
                     .size(11.0)
                     .color(theme.text_dim),
             );
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             let current = status.edge();
             ui.horizontal(|ui| {
                 for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
                     let selected = current == edge;
-                    let label = match edge {
-                        Edge::Left => "◀ Left",
-                        Edge::Right => "Right ▶",
-                        Edge::Top => "▲ Top",
-                        Edge::Bottom => "▼ Bottom",
-                    };
-                    if ui.selectable_label(selected, label).clicked() && !selected {
+                    if tab_button(ui, theme, selected, edge_title(edge)).clicked() && !selected {
                         self.engine.execute(Cmd::SetEdge(edge));
                     }
                 }
@@ -1008,7 +1029,7 @@ impl WinApp {
 
         // --- peer / control ----------------------------------------------
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Connected device").strong());
+            card_title(ui, theme, "Connected device");
             match &status.peer {
                 Some(peer) => {
                     ui.horizontal(|ui| {
@@ -1075,7 +1096,7 @@ impl WinApp {
     fn client_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
         // --- connection state --------------------------------------------
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Connection").strong());
+            card_title(ui, theme, "Connection");
             match &status.peer {
                 Some(peer) if status.state == ConnStateMirror::Connected => {
                     ui.horizontal(|ui| {
@@ -1142,7 +1163,7 @@ impl WinApp {
             || status.state == ConnStateMirror::AwaitingPair;
         if awaiting {
             card(ui, theme, |ui| {
-                ui.label(egui::RichText::new("Enter the pairing code").strong());
+                card_title(ui, theme, "Enter the pairing code");
                 ui.label(
                     egui::RichText::new("The code is shown on the server's screen.")
                         .size(11.0)
@@ -1168,7 +1189,7 @@ impl WinApp {
 
         // --- discovered servers ------------------------------------------
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Servers on this network").strong());
+            card_title(ui, theme, "Servers on this network");
             let servers: Vec<&DeviceMirror> = status
                 .discovered
                 .iter()
@@ -1213,12 +1234,13 @@ impl WinApp {
 
         // --- manual address / link ---------------------------------------
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Connect manually").strong());
+            card_title(ui, theme, "Connect manually");
             ui.horizontal(|ui| {
+                let field_width = (ui.available_width() - 104.0).max(120.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.manual_addr)
                         .hint_text("192.168.1.42[:24800]")
-                        .desired_width(f32::INFINITY),
+                        .desired_width(field_width),
                 );
                 if ui.button("Connect").clicked() {
                     match parse_host_port(&self.manual_addr) {
@@ -1235,17 +1257,18 @@ impl WinApp {
                     }
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Or paste a flowlink:// invite link")
                     .size(11.0)
                     .color(theme.text_dim),
             );
             ui.horizontal(|ui| {
+                let field_width = (ui.available_width() - 80.0).max(120.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.link_edit)
                         .hint_text("flowlink://connect?h=…")
-                        .desired_width(f32::INFINITY),
+                        .desired_width(field_width),
                 );
                 if ui.button("Open").clicked() {
                     let link = self.link_edit.trim().to_string();
@@ -1262,7 +1285,7 @@ impl WinApp {
 
         // --- remembered servers ------------------------------------------
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Remembered servers").strong());
+            card_title(ui, theme, "Remembered servers");
             if status.paired_devices.is_empty() {
                 ui.label(
                     egui::RichText::new("Nothing remembered yet.")
@@ -1340,7 +1363,7 @@ impl WinApp {
 
     fn settings_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("This device").strong());
+            card_title(ui, theme, "This device");
             egui::Grid::new("device_settings")
                 .num_columns(2)
                 .spacing([12.0, 10.0])
@@ -1457,7 +1480,7 @@ impl WinApp {
         ui.add_space(10.0);
 
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Files").strong());
+            card_title(ui, theme, "Files");
             ui.horizontal(|ui| {
                 if ui.button("Open logs folder").clicked() {
                     let logs = flowlink_core::config::logs_dir(&self.config_dir);
@@ -1483,7 +1506,7 @@ impl WinApp {
 
         ui.add_space(10.0);
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("About").strong());
+            card_title(ui, theme, "About");
             ui.label(format!("FlowLink {}", status.version));
             ui.label(
                 egui::RichText::new(
@@ -1508,7 +1531,7 @@ impl WinApp {
 
     fn hotkey_card(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
         card(ui, theme, |ui| {
-            ui.label(egui::RichText::new("Control hotkey").strong());
+            card_title(ui, theme, "Control hotkey");
             ui.label(
                 egui::RichText::new(format!(
                     "Currently {} — used to toggle control on both machines.",
@@ -1643,6 +1666,55 @@ impl WinApp {
         if !self.quitting && !self.onboarding && self.page == Page::Server {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+
+        self.screenshot_tick(ctx);
+    }
+
+    /// Preview/screenshot mode: let the engine settle, capture one frame,
+    /// write it as PNG and quit. A no-op unless `--screenshot` was passed.
+    fn screenshot_tick(&mut self, ctx: &egui::Context) {
+        /// ~1.5 s at 60 fps so the first engine status has arrived.
+        const SETTLE_FRAMES: u32 = 90;
+        /// Give up if the backend never delivers the image.
+        const GIVE_UP_FRAMES: u32 = 240;
+
+        let Some(path) = self.screenshot.clone() else {
+            return;
+        };
+
+        if !self.screenshot_requested {
+            self.screenshot_frames += 1;
+            ctx.request_repaint_after(Duration::from_millis(16));
+            if self.screenshot_frames >= SETTLE_FRAMES {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                self.screenshot_requested = true;
+                self.screenshot_frames = 0;
+                ctx.request_repaint();
+            }
+            return;
+        }
+
+        let mut captured = false;
+        ctx.input(|input| {
+            for event in &input.events {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    save_screenshot(image, &path);
+                    captured = true;
+                }
+            }
+        });
+        if captured {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.screenshot_frames += 1;
+        ctx.request_repaint_after(Duration::from_millis(16));
+        if self.screenshot_frames > GIVE_UP_FRAMES {
+            tracing::error!("preview screenshot was never delivered by the backend");
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 
@@ -1662,16 +1734,60 @@ impl eframe::App for WinApp {
 // ---------------------------------------------------------------------------
 
 /// Build the engine, start the platform threads and run the UI.
+///
+/// Besides the normal application mode this also supports the cross-platform
+/// preview facility used to keep the Windows design aligned with macOS:
+///
+/// ```text
+/// --config-dir <dir>      use an isolated config directory
+/// --preview-page <page>   server | client | settings (dashboard previews)
+/// --screenshot <file>     capture one frame to a PNG and exit
+/// ```
 pub fn run() -> Result<()> {
-    let start_hidden = std::env::args().any(|arg| arg == "--autostart");
+    let mut preview_page: Option<Page> = None;
+    let mut screenshot: Option<PathBuf> = None;
+    let mut config_dir_override: Option<PathBuf> = None;
+    let mut preview_theme: Option<bool> = None;
+    {
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--preview-page" => {
+                    preview_page = match args.next().as_deref() {
+                        Some("server") => Some(Page::Server),
+                        Some("client") => Some(Page::Client),
+                        Some("settings") => Some(Page::Settings),
+                        other => {
+                            warn!(page = ?other, "unknown preview page");
+                            None
+                        }
+                    };
+                }
+                "--screenshot" => screenshot = args.next().map(PathBuf::from),
+                "--config-dir" => config_dir_override = args.next().map(PathBuf::from),
+                "--preview-theme" => {
+                    preview_theme = match args.next().as_deref() {
+                        Some("dark") => Some(true),
+                        Some("light") => Some(false),
+                        other => {
+                            warn!(theme = ?other, "unknown preview theme");
+                            None
+                        }
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+    let start_hidden = std::env::args().any(|arg| arg == "--autostart") && preview_page.is_none();
 
     // Physical-pixel geometry must be settled before the hooks or the screen
     // metrics are used.
     input::init_process_dpi_awareness();
 
     let shared = AppShared::new();
-    let config_dir = flowlink_core::config::default_config_dir();
-    let onboarded = config_dir.join(ONBOARDED_MARKER).exists();
+    let config_dir = config_dir_override.unwrap_or_else(flowlink_core::config::default_config_dir);
+    let onboarded_marker = config_dir.join(ONBOARDED_MARKER).exists();
 
     let engine = Engine::new(config_dir.clone(), Arc::clone(&shared) as Arc<dyn Host>)
         .context("starting the FlowLink engine")?;
@@ -1687,10 +1803,22 @@ pub fn run() -> Result<()> {
     );
 
     engine.execute(Cmd::SetLocalScreen(input::local_screen()));
-    if onboarded {
+    if onboarded_marker {
         engine.execute(Cmd::Start);
     } else {
         info!("waiting for onboarding to complete");
+    }
+    // Dashboard previews need realistic engine state (listening + code for
+    // the server page, an idle client for the client page).
+    if let Some(page) = preview_page {
+        let mode = match page {
+            Page::Client => Mode::Client,
+            _ => Mode::Server,
+        };
+        engine.execute(Cmd::SetMode(mode));
+        if mode == Mode::Server {
+            engine.execute(Cmd::Start);
+        }
     }
 
     let (tray_tx, tray_rx) = crossbeam_channel::unbounded();
@@ -1716,8 +1844,11 @@ pub fn run() -> Result<()> {
                 tray_rx,
                 tray_tx,
                 config_dir,
-                onboarded,
+                onboarded_marker || preview_page.is_some(),
                 start_hidden,
+                preview_page,
+                screenshot,
+                preview_theme,
             )?;
             Ok(Box::new(app))
         }),
@@ -1726,67 +1857,151 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Write an egui screenshot to `path` as a PNG.
+fn save_screenshot(image: &egui::ColorImage, path: &Path) {
+    let width = image.size[0] as u32;
+    let height = image.size[1] as u32;
+    let mut rgba = Vec::with_capacity(image.pixels.len() * 4);
+    for pixel in &image.pixels {
+        rgba.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
+    }
+    match image::RgbaImage::from_raw(width, height, rgba) {
+        Some(buffer) => match buffer.save(path) {
+            Ok(()) => info!(path = %path.display(), "preview screenshot written"),
+            Err(err) => tracing::error!("writing screenshot failed: {err}"),
+        },
+        None => tracing::error!("screenshot buffer has unexpected dimensions"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
 
 /// A rounded card — the main layout primitive of the dashboards.
+///
+/// Cards always span the available width (like the macOS design), never
+/// shrink-wrapping around short content.
 fn card<R>(ui: &mut egui::Ui, theme: &Theme, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    const MARGIN: f32 = 16.0;
+    let inner_width = (ui.available_width() - MARGIN * 2.0 - 2.0).max(120.0);
     egui::Frame::default()
         .fill(theme.card)
         .stroke(egui::Stroke::new(1.0_f32, theme.border))
         .corner_radius(egui::CornerRadius::same(theme::CARD_RADIUS))
-        .inner_margin(egui::Margin::same(14))
-        .show(ui, contents)
+        .inner_margin(egui::Margin::same(MARGIN as i8))
+        .show(ui, |ui| {
+            ui.set_min_width(inner_width);
+            contents(ui)
+        })
         .inner
 }
 
-/// A selectable onboarding role card.
+/// Small uppercase section header — the same visual signature as the macOS
+/// design system ("PAIRING", "SCREEN EDGE", …).
+fn card_title(ui: &mut egui::Ui, theme: &Theme, text: &str) {
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .size(10.5)
+            .strong()
+            .color(theme.text_dim),
+    );
+}
+
+/// A segmented-control style tab (used for the header navigation).
+fn tab_button(ui: &mut egui::Ui, theme: &Theme, selected: bool, label: &str) -> egui::Response {
+    let text = egui::RichText::new(label).size(12.5);
+    let text = if selected {
+        text.strong().color(egui::Color32::WHITE)
+    } else {
+        text.color(theme.text_dim)
+    };
+    let button = egui::Button::new(text)
+        .fill(if selected {
+            theme.accent
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .corner_radius(egui::CornerRadius::same(7))
+        .min_size(egui::vec2(0.0, 24.0));
+    ui.add(button)
+}
+
+/// The little rounded-square brand glyph next to the window title.
+fn brand_glyph(ui: &mut egui::Ui, theme: &Theme) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 6.0_f32, theme.accent);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "⇄",
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
+}
+
+/// A selectable onboarding role card: fixed height, left-aligned content,
+/// equal weight for both options.
 fn mode_card(
     ui: &mut egui::Ui,
     theme: &Theme,
     width: f32,
+    height: f32,
     glyph: &str,
     title: &str,
-    subtitle: &str,
+    detail: &str,
     selected: bool,
 ) -> egui::Response {
-    let stroke = if selected {
-        egui::Stroke::new(2.0_f32, theme.accent)
-    } else {
-        egui::Stroke::new(1.0_f32, theme.border)
-    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let hovered = response.hovered();
     let fill = if selected {
-        theme.accent.gamma_multiply(0.14)
+        theme.accent.gamma_multiply(0.13)
+    } else if hovered {
+        theme.card.gamma_multiply(1.15)
     } else {
         theme.card
     };
-    let response = egui::Frame::default()
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(egui::CornerRadius::same(theme::CARD_RADIUS))
-        .inner_margin(egui::Margin::same(12))
-        .show(ui, |ui| {
-            ui.set_width((width - 26.0).max(80.0));
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new(glyph).size(22.0));
-                ui.label(egui::RichText::new(title).strong().size(13.0));
-                ui.label(
-                    egui::RichText::new(subtitle)
-                        .size(10.5)
-                        .color(theme.text_dim),
-                );
-            });
-        })
-        .response;
-    response.interact(egui::Sense::click())
+    let stroke = if selected {
+        egui::Stroke::new(1.6_f32, theme.accent)
+    } else if hovered {
+        egui::Stroke::new(1.0_f32, theme.accent.gamma_multiply(0.5))
+    } else {
+        egui::Stroke::new(1.0_f32, theme.border)
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        theme::CARD_RADIUS as f32,
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let mut content = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink(13.0))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    content.label(egui::RichText::new(glyph).size(17.0));
+    content.add_space(4.0);
+    content.label(
+        egui::RichText::new(title)
+            .size(13.0)
+            .strong()
+            .color(theme.text),
+    );
+    content.add_space(2.0);
+    content.label(egui::RichText::new(detail).size(10.5).color(theme.text_dim));
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Metrics strip shown at the bottom of both dashboards.
 fn metrics_card(ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
     let metrics = &status.metrics;
     card(ui, theme, |ui| {
-        ui.label(egui::RichText::new("Traffic").strong());
+        card_title(ui, theme, "Traffic");
         ui.label(
             egui::RichText::new(format!(
                 "RTT {:.1} ms · ↓ {} · ↑ {} · events {} in / {} out · up {}",
@@ -1843,6 +2058,16 @@ fn format_code(code: &str) -> String {
         format!("{} {}", &code[..3], &code[3..])
     } else {
         code.to_string()
+    }
+}
+
+/// Title-case name for an edge (the picker labels).
+fn edge_title(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Left => "Left",
+        Edge::Right => "Right",
+        Edge::Top => "Top",
+        Edge::Bottom => "Bottom",
     }
 }
 

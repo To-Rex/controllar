@@ -857,6 +857,7 @@ dependencies = [
  "eframe",
  "egui",
  "flowlink-core",
+ "image",
  "parking_lot",
  "serde",
  "serde_json",

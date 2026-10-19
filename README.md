@@ -27,6 +27,21 @@ macOS, Win32/egui on Windows) capture and inject input and render the UI.
 - **Launch at login** — `SMAppService` on macOS, HKCU Run key on Windows.
 - **File logs** — daily-rotated `flowlink.log.<date>` with an in-app viewer.
 
+## Screenshots
+
+Both shells implement the same design system (violet accent, light/dark
+palettes, rounded cards, uppercase section headers). Windows previews are
+rendered by the cross-platform egui build (see docs/BUILD.md, "UI preview
+mode"); macOS previews come from the app's built-in snapshot mode
+(`FLOWLINK_SNAPSHOT_DIR`).
+
+| | |
+| --- | --- |
+| ![macOS onboarding](docs/screenshots/macos-onboarding.png) | ![Windows onboarding](docs/screenshots/windows-onboarding.png) |
+| ![macOS server dashboard](docs/screenshots/macos-server.png) | ![Windows server dashboard](docs/screenshots/windows-server.png) |
+| ![macOS settings](docs/screenshots/macos-settings.png) | ![Windows settings](docs/screenshots/windows-settings.png) |
+| ![macOS menu bar](docs/screenshots/macos-menubar.png) | ![Windows client page, light theme](docs/screenshots/windows-server-light.png) |
+
 ## Repository layout
 
 ```

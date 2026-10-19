@@ -1208,6 +1208,7 @@ impl Engine {
             status.peer = Some(PeerStatus {
                 id: hello.device_id.clone(),
                 name: hello.name.clone(),
+                version: Some(hello.version.clone()),
                 fingerprint: None,
                 addr: addr.to_string(),
                 paired: false,
@@ -1221,6 +1222,7 @@ impl Engine {
         &self,
         id: &str,
         name: &str,
+        version: Option<String>,
         fingerprint: Option<String>,
         addr: &str,
         paired: bool,
@@ -1230,6 +1232,7 @@ impl Engine {
             status.peer = Some(PeerStatus {
                 id: id.to_string(),
                 name: name.to_string(),
+                version,
                 fingerprint,
                 addr: addr.to_string(),
                 paired,

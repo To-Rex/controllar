@@ -86,6 +86,7 @@ pub struct LocalInfoMirror {
 pub struct PeerMirror {
     pub id: String,
     pub name: String,
+    pub version: Option<String>,
     pub fingerprint: Option<String>,
     pub addr: String,
     pub paired: bool,
@@ -1108,6 +1109,13 @@ impl WinApp {
                 Some(peer) => {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(&peer.name).size(15.0).strong());
+                        if let Some(version) = &peer.version {
+                            ui.label(
+                                egui::RichText::new(format!("v{version}"))
+                                    .size(10.5)
+                                    .color(theme.text_dim),
+                            );
+                        }
                         ui.label(
                             egui::RichText::new(if peer.paired { "paired" } else { "unverified" })
                                 .size(11.0)
@@ -1366,6 +1374,13 @@ impl WinApp {
                 Some(peer) if status.state == ConnStateMirror::Connected => {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(&peer.name).size(15.0).strong());
+                        if let Some(version) = &peer.version {
+                            ui.label(
+                                egui::RichText::new(format!("v{version}"))
+                                    .size(10.5)
+                                    .color(theme.text_dim),
+                            );
+                        }
                         ui.label(
                             egui::RichText::new(peer.addr.clone())
                                 .size(11.0)

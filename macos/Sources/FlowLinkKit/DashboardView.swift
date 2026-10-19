@@ -175,6 +175,11 @@ public struct DashboardView: View {
                     Text(peer.addr).font(.system(.caption, design: .monospaced)).foregroundStyle(DS.textDim)
                 }
                 Spacer()
+                if let version = peer.version {
+                    Text("v\(version)")
+                        .font(.system(.caption2))
+                        .foregroundStyle(DS.textFaint)
+                }
                 if let fingerprint = peer.fingerprint {
                     FingerprintText(fingerprint: fingerprint)
                 } else if peer.paired {

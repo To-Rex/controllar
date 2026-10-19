@@ -198,11 +198,17 @@ async fn run_server_session(
         let _ = send(
             &mut stream,
             &Message::Bye {
-                reason: format!("protocol version mismatch (server {PROTOCOL_VERSION})"),
+                reason: format!(
+                    "protocol version mismatch: this server speaks {PROTOCOL_VERSION}, the client speaks {} — update FlowLink on both computers",
+                    hello.protocol
+                ),
             },
         )
         .await;
-        return Err(anyhow!("protocol mismatch: client {}", hello.protocol));
+        return Err(anyhow!(
+            "protocol mismatch: client speaks {}, this build speaks {PROTOCOL_VERSION}",
+            hello.protocol
+        ));
     }
 
     // Single-client policy: politely refuse while busy.
@@ -240,7 +246,14 @@ async fn run_server_session(
             }
         ),
     );
-    tracing::info!(%peer, client = %hello.name, known = paired.is_some(), "client connected");
+    tracing::info!(
+        %peer,
+        client = %hello.name,
+        version = %hello.version,
+        protocol = hello.protocol,
+        known = paired.is_some(),
+        "client connected"
+    );
 
     // ---- Auth / pairing phase -----------------------------------------
     let deadline = tokio::time::Instant::now() + AUTH_TIMEOUT;
@@ -354,6 +367,7 @@ async fn run_server_session(
     engine.set_connected_peer(
         &hello.device_id,
         &hello.name,
+        Some(hello.version.clone()),
         None,
         &peer.to_string(),
         paired.is_some() || paired_now,
@@ -477,7 +491,7 @@ async fn run_client_session(
     };
     if ack.protocol != PROTOCOL_VERSION {
         return Err(anyhow!(
-            "protocol mismatch: server speaks {}, this build speaks {PROTOCOL_VERSION}",
+            "protocol mismatch: the server speaks {}, this build speaks {PROTOCOL_VERSION} — update FlowLink on both computers",
             ack.protocol
         ));
     }
@@ -493,12 +507,19 @@ async fn run_client_session(
     engine.set_connected_peer(
         &ack.device_id,
         &ack.name,
+        Some(ack.version.clone()),
         presented.clone(),
         &addr_string,
         target.token.is_some(),
     );
     engine.notice("peer", &format!("connected to {}", ack.name));
-    tracing::info!(server = %ack.name, addr = %addr_string, "connected (TLS established)");
+    tracing::info!(
+        server = %ack.name,
+        version = %ack.version,
+        protocol = ack.protocol,
+        addr = %addr_string,
+        "connected (TLS established)"
+    );
 
     // ---- Authentication -------------------------------------------------
     let mut authenticated = false;
@@ -542,7 +563,14 @@ async fn run_client_session(
     if let Some(token) = &token_used {
         engine.save_server_token(&ack.device_id, &ack.name, token, &target.host);
     }
-    engine.set_connected_peer(&ack.device_id, &ack.name, presented, &addr_string, true);
+    engine.set_connected_peer(
+        &ack.device_id,
+        &ack.name,
+        Some(ack.version.clone()),
+        presented,
+        &addr_string,
+        true,
+    );
     engine.set_state(ConnState::Connected);
     engine.refresh_pairing_status();
     engine.notice("connected", &format!("connected to {}", ack.name));

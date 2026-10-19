@@ -63,13 +63,14 @@ public struct FLLocalInfo: Codable {
 public struct FLPeerInfo: Codable {
     public var id: String
     public var name: String
+    public var version: String?
     public var fingerprint: String?
     public var addr: String
     public var paired: Bool
     public var sinceMs: UInt64
 
     enum CodingKeys: String, CodingKey {
-        case id, name, fingerprint, addr, paired
+        case id, name, version, fingerprint, addr, paired
         case sinceMs = "since_ms"
     }
 }

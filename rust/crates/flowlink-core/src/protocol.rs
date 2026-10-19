@@ -24,7 +24,11 @@ use serde::{Deserialize, Serialize};
 use crate::types::{DeviceId, InputEvent, Mode, ScreenInfo};
 
 /// Protocol version understood by this build.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// Bumped to 2 for the symmetric focus model: both sides now exchange input,
+/// so a 1.x peer would connect but silently drop the other side's input.
+/// The handshake rejects mismatches with an explicit `Bye` instead.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Hard cap for a single framed message (clipboard text included).
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;

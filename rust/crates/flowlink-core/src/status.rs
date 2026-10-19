@@ -67,6 +67,8 @@ pub struct LocalInfo {
 pub struct PeerStatus {
     pub id: DeviceId,
     pub name: String,
+    /// Peer application version, when known.
+    pub version: Option<String>,
     pub fingerprint: Option<String>,
     pub addr: String,
     pub paired: bool,

@@ -36,6 +36,18 @@ impl RecordingHost {
             .unwrap_or(false)
     }
 
+    fn focused(&self) -> bool {
+        self.latest_status()
+            .and_then(|s| s["focused"].as_bool())
+            .unwrap_or(false)
+    }
+
+    fn forwarding(&self) -> bool {
+        self.latest_status()
+            .and_then(|s| s["forwarding"].as_bool())
+            .unwrap_or(false)
+    }
+
     fn inputs(&self) -> Vec<InputEvent> {
         self.inputs.lock().unwrap().clone()
     }
@@ -147,7 +159,18 @@ async fn two_engines_pair_and_exchange_input() {
             "client should store the pairing token"
         );
 
-        // ---- Edge crossing activates remote control ------------------------
+        // The server's screen owns the shared cursor when the session starts;
+        // the client begins by forwarding its input.
+        wait_until("server starts focused", Duration::from_secs(5), || {
+            server_host.focused()
+        })
+        .await;
+        wait_until("client starts forwarding", Duration::from_secs(5), || {
+            client_host.forwarding()
+        })
+        .await;
+
+        // ---- Edge crossing hands the cursor to the client -------------------
         server.execute(Cmd::SetEdge(Edge::Right));
         server.execute(Cmd::HostInput(HostInput::MouseMove {
             x_px: 1920.0,
@@ -163,16 +186,14 @@ async fn two_engines_pair_and_exchange_input() {
                 .any(|e| matches!(e, InputEvent::Enter { .. }))
         })
         .await;
-        wait_until(
-            "server reports remote_active",
-            Duration::from_secs(5),
-            || server_host.remote_active(),
-        )
+        wait_until("client owns the cursor", Duration::from_secs(5), || {
+            client_host.focused()
+        })
         .await;
         wait_until(
-            "client reports being controlled",
+            "server forwards input to the client",
             Duration::from_secs(5),
-            || client_host.remote_active(),
+            || server_host.forwarding(),
         )
         .await;
 
@@ -242,14 +263,58 @@ async fn two_engines_pair_and_exchange_input() {
         })
         .await;
 
-        // ---- Reclaim: client returns control to the server -----------------
-        client.execute(Cmd::RequestControl);
-        wait_until("server released remote", Duration::from_secs(5), || {
-            !server_host.remote_active()
+        // ---- Symmetric focus: the client hands the cursor back -------------
+        client.execute(Cmd::SetEdge(Edge::Left));
+        client.execute(Cmd::ToggleControl);
+        wait_until(
+            "server owns the cursor again",
+            Duration::from_secs(5),
+            || server_host.focused(),
+        )
+        .await;
+        wait_until("client forwards again", Duration::from_secs(5), || {
+            client_host.forwarding()
         })
         .await;
-        wait_until("client got ReleaseAll", Duration::from_secs(5), || {
-            client_host
+
+        // One keyboard on either desk types into the focused screen: the
+        // client's physical keys are now relayed to the server.
+        client.execute(Cmd::HostInput(HostInput::Key {
+            usage: flowlink_core::hid::usage::B,
+            down: true,
+            modifiers: Modifiers::NONE,
+        }));
+        wait_until(
+            "server received the client's key",
+            Duration::from_secs(5),
+            || {
+                server_host.inputs().iter().any(|event| {
+                    matches!(
+                        event,
+                        InputEvent::Key { usage, down: true, .. }
+                            if *usage == flowlink_core::hid::usage::B
+                    )
+                })
+            },
+        )
+        .await;
+
+        // ---- Reclaim from the unfocused side (hotkey on the client) --------
+        client.execute(Cmd::RequestControl);
+        wait_until(
+            "client owns the cursor again",
+            Duration::from_secs(5),
+            || client_host.focused(),
+        )
+        .await;
+        wait_until(
+            "server let go of the cursor",
+            Duration::from_secs(5),
+            || !server_host.focused(),
+        )
+        .await;
+        wait_until("server released held input", Duration::from_secs(5), || {
+            server_host
                 .inputs()
                 .iter()
                 .any(|e| matches!(e, InputEvent::ReleaseAll))

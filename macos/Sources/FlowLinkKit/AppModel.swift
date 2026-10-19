@@ -51,9 +51,6 @@ public final class AppModel: ObservableObject {
         clipboard.onLocalChange = { [weak self] text in
             self?.bridge.setClipboardText(text)
         }
-        injector.onReturnControl = { [weak self] in
-            self?.bridge.requestControl()
-        }
         // Nested ObservableObject: republish permission changes through the
         // model so any view reading `model.permissions.*` updates too.
         permissions.objectWillChange
@@ -136,8 +133,7 @@ public final class AppModel: ObservableObject {
         }
 
         tapShared.update { snapshot in
-            snapshot.mode = new.mode
-            snapshot.remoteActive = new.remoteActive
+            snapshot.forwarding = new.isForwarding
             snapshot.hotkeyModifiers = new.hotkey.modifiers
             snapshot.hotkeyUsage = new.hotkey.usage
         }
@@ -147,17 +143,16 @@ public final class AppModel: ObservableObject {
             tapRunning = tap.start()
         }
 
-        // Cursor hiding while the server drives the remote cursor.
-        if new.mode == .server {
-            let wasActive = previous?.remoteActive ?? false
-            if new.remoteActive && !wasActive {
-                injector.hideCursor()
-            } else if !new.remoteActive && wasActive {
-                injector.showCursor(at: new.edge)
-            }
+        // The physical cursor is hidden while this side's input is forwarded
+        // to the other computer; it reappears when focus comes back.
+        let wasForwarding = previous?.isForwarding ?? false
+        if new.isConnected && new.isForwarding && !wasForwarding {
+            injector.hideCursor()
+        } else if !new.isForwarding && wasForwarding {
+            injector.showCursor()
         }
-        if new.mode == .client, previous?.mode == .server {
-            injector.showCursor(at: nil)
+        if !new.isConnected && wasForwarding {
+            injector.showCursor()
         }
     }
 
@@ -250,7 +245,7 @@ public final class AppModel: ObservableObject {
 
     public var menuBarSymbol: String {
         guard let status else { return "rectangle.on.rectangle.slash" }
-        switch (status.state, status.remoteActive) {
+        switch (status.state, status.ownsCursor) {
         case ("connected", true): return "rectangle.connected.to.line.below"
         case ("connected", false): return "rectangle.on.rectangle"
         case ("off", _): return "rectangle.on.rectangle.slash"
@@ -260,22 +255,18 @@ public final class AppModel: ObservableObject {
 
     public var statusHeadline: String {
         guard let status else { return "Starting…" }
-        switch status.mode {
-        case .server:
-            switch status.state {
-            case "listening": return status.peer == nil ? "Listening for clients" : "Pairing in progress"
-            case "connected": return status.remoteActive ? "Controlling \(status.peer?.name ?? "remote")" : (status.peer.map { "\($0.name) connected" } ?? "Connected")
-            case "error": return "Error"
-            default: return status.stateLabel
-            }
-        case .client:
-            switch status.state {
-            case "connected": return status.remoteActive ? "Controlled by \(status.peer?.name ?? "server")" : (status.peer.map { "Connected to \($0.name)" } ?? "Connected")
-            case "awaiting_pair": return "Enter the pairing code"
-            case "reconnecting": return "Reconnecting…"
-            case "error": return "Connection error"
-            default: return status.stateLabel
-            }
+        let peer = status.peer?.name ?? "the other computer"
+        switch status.state {
+        case "connected":
+            return status.ownsCursor
+                ? "Cursor on this Mac — press the hotkey or cross the edge to switch"
+                : "Cursor on \(peer) — your input is forwarded there"
+        case "listening":
+            return status.peer == nil ? "Listening for clients" : "Pairing in progress"
+        case "awaiting_pair": return "Enter the pairing code"
+        case "reconnecting": return "Reconnecting…"
+        case "error": return "Connection error"
+        default: return status.stateLabel
         }
     }
 }

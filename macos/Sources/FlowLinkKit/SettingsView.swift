@@ -170,8 +170,8 @@ public struct SettingsView: View {
 
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Cursor exit edge").font(.system(.callout, weight: .medium))
-                    Text("Server mode only — where the cursor leaves this Mac")
+                    Text("Cursor edge").font(.system(.callout, weight: .medium))
+                    Text("The edge of this screen that faces the other computer — crossing it moves the cursor there")
                         .font(.system(.caption))
                         .foregroundStyle(DS.textDim)
                 }

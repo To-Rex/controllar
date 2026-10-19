@@ -11,11 +11,12 @@ tanishtiriladi va keyin o‘zaro eslab qolinadi.
 
 | Atama | Ma’nosi |
 |---|---|
-| **Server** | Boshqaruvchi kompyuter. Uning klaviaturasi/sichqonchasi chetga o‘tganda narigi kompyuterni boshqaradi. |
-| **Client** | Boshqariladigan kompyuter. Undan serverga qaytish ham mumkin (kursorni orqaga surish yoki hotkey orqali). |
+| **Server** | Ulanishni qabul qiluvchi (tinglovchi) kompyuter. |
+| **Client** | Serverga ulanuvchi kompyuter. |
+| **Bitta umumiy kursor** | Bir vaqtda bitta ekranda bo‘ladi; qaysi kompyuterda bo‘lsa, **o‘sha tomondagi** klaviatura/sichqoncha uni boshqaradi (server/client faqat kim tinglashi bilan farq qiladi). |
 | **Juftlik kodi** | Server ekranida ko‘rinadigan 6 xonali kod. 10 daqiqa amal qiladi, 5 marta xato kiritilsa yangilanadi. |
-| **Hotkey** | Boshqaruvni almashtiruvchi tugmalar birikmasi. Standart: `Ctrl + Alt + Space`. |
-| **Chet (edge)** | Server kursori qaysi tomondan chiqib narigi kompyuterga o‘tadi (chap/o‘ng/yuqori/past). |
+| **Hotkey** | Kursorni bir kompyuterdan ikkinchisiga o‘tkazuvchi tugmalar birikmasi. Standart: `Ctrl + Alt + Space` (ikkala kompyuterda ham ishlaydi). |
+| **Chet (edge)** | Har bir kompyuterda o‘zaro qarama-qarshi tomondagi chegara (masalan Windows — o‘ng, Mac — chap). Kursor shu chetdan chiqsa, narigi ekranga o‘tadi. |
 
 ## 2. Talablar
 
@@ -84,20 +85,26 @@ FlowLink.exe’ni ishga tushiring — u tray (system tray)da turadi.
 Juftlashдan keyin ikkala tomon ham bir-birini eslab qoladi: keyingi safar
 client avtomatik ulanadi (token orqali, kodsiz).
 
-## 5. Kundalik foydalanish
+## 5. Kundalik foydalanish — bitta tana, ikki ekran
 
-- **Kursor server chegarasidan chiqadi** → boshqaruv clientga o‘tadi
-  (server kursori shu payt yashiriladi).
-- **Clientda kursorni kirgan chetiga qarab sursangiz** → boshqaruv serverga
-  qaytadi.
-- **`Ctrl + Alt + Space`** (standart hotkey) — boshqaruvni darhol almashtiradi.
-  Hotkey’ni Sozlamalar → Toggle hotkey → **Change** orqali o‘zgartirish mumkin.
+- **Bitta umumiy kursor** bor: u bir vaqtda bitta ekranda turadi.
+- **Qaysi kompyuterda kursor bo‘lsa, o‘sha tomondagi klaviatura va sichqoncha
+  uni boshqaradi**; ikkinchi kompyuterning klaviaturasi ham o‘sha aktiv
+  ekranga yozadi (matn, shortcutlar, clipboard — hammasi).
+- **Kursorni o‘tkazish:** aktiv kompyuterda sichqonchani **narigi kompyuterga
+  qaragan chetga** suring (masalan Windows o‘ng chetga, Mac chap chetga) —
+  kursor ikkinchi ekranga o‘tadi va u yerda davom etadi.
+- **`Ctrl + Alt + Space`** istalgan klaviaturada kursorni bu yerga/nariga
+  o‘tkazadi. Aktiv bo‘lmagan tomonda bossangiz — kursor shu tomonga keladi;
+  aktiv tomonda bossangiz — narigi tomonga ketadi.
+- **Chetlarni sozlash:** har bir kompyuterda **Sozlamalar → Cursor edge** —
+  qaysi chekka narigi kompyuterga qaragan bo‘lsa, o‘sha tanlanadi
+  (Windows — o‘ng, Mac — chap kabi). Ikkalasi bir xil chetni tanlamasin.
 - **Clipboard**: matn ikki tomonga avtomatik sinxronlanadi (1 MB gacha).
   Parol menejerlarining “concealed” nusxalari **hech qachon** uzatilmaydi.
-- **Chetni o‘zgartirish**: Sozlamalar → Cursor exit edge (Chap/O‘ng/Yuqori/Past).
 - **Fon rejimi**: oynani yopsangiz ham dastur menu bar/tray’da ishlashda davom
-  etadi. Menu bar belgisidan: boshqaruvni olish/qaytarish, rejimni almashtirish,
-  to‘xtatish/ishga tushirish, chiqish.
+  etadi. Menu bar belgisidan: kursorni bu yerga/nariga o‘tkazish, rejimni
+  almashtirish, to‘xtatish/ishga tushirish, chiqish.
 - **Tizim bilan avtomatik ishga tushish**: Sozlamalar → Launch at login.
 
 ## 6. Muammolarni bartaraf qilish

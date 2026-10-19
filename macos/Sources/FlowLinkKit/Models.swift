@@ -177,6 +177,10 @@ public struct FLStatus: Codable {
     public var peer: FLPeerInfo?
     public var pairing: FLPairingInfo?
     public var remoteActive: Bool
+    /// This side owns the shared cursor.
+    public var focused: Bool?
+    /// This side's input is being forwarded to the peer.
+    public var forwarding: Bool?
     public var remoteEdge: FLEdge?
     public var edge: FLEdge
     public var clipboardEnabled: Bool
@@ -202,6 +206,10 @@ public struct FLStatus: Codable {
 
     public var isConnected: Bool { state == "connected" }
     public var isRunning: Bool { state != "off" }
+    /// True while this Mac owns the shared cursor.
+    public var ownsCursor: Bool { focused ?? !remoteActive }
+    /// True while this Mac's input is being captured for the other computer.
+    public var isForwarding: Bool { forwarding ?? remoteActive }
 
     public var stateLabel: String {
         switch state {

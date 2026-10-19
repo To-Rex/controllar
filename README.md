@@ -1,16 +1,19 @@
 # FlowLink
 
 FlowLink shares one keyboard, mouse and clipboard between a macOS and a
-Windows computer over the local network: the server drives, the client is
-driven, and the cursor crosses between them when it leaves the configured
-screen edge. One Rust core (`flowlink-core`) implements the wire protocol,
-encrypted transport, pairing and discovery; native shells (Swift/SwiftUI on
-macOS, Win32/egui on Windows) capture and inject input and render the UI.
+Windows computer over the local network: one shared cursor moves between the
+screens, and the keyboard (and mouse) on **either** desk drives whichever
+screen currently shows it — the "one body, two screens" model. One Rust core
+(`flowlink-core`) implements the wire protocol, encrypted transport, pairing
+and discovery; native shells (Swift/SwiftUI on macOS, Win32/egui on Windows)
+capture and inject input and render the UI.
 
 ## Features
 
-- **Server and client modes** — a role per installation, switchable at any
-  time from Settings; switching restarts the listener/dialer automatically.
+- **Server and client roles** — a role per installation (who listens),
+  switchable at any time from Settings; input sharing itself is symmetric:
+  the keyboard and mouse on **either** computer drive whichever screen shows
+  the shared cursor.
 - **Connect any way you like** — mDNS auto-discovery of servers on the LAN,
   manual IP/port entry, scanning the server's QR code, or pasting a
   `flowlink://connect?...` link.
@@ -110,9 +113,12 @@ elevated windows.
 3. Type or scan the code. Both devices now remember each other: the server
    stores an entry with a 32-byte token, the client stores the token in
    `last_server`, and later connections authenticate silently.
-4. Move the cursor across the configured edge (default: right) or press the
-   hotkey **Ctrl+Alt+Space** to toggle control. On the client, pushing the
-   cursor back over the entry edge returns control.
+4. Move the cursor across the edge you configured on **each** machine
+   (e.g. Mac = Left, Windows = Right when the Windows PC sits on the left),
+   or press the hotkey **Ctrl+Alt+Space** on either keyboard. The cursor
+   jumps to the other screen, hides here, and the keyboard at either desk
+   now types into the focused screen. Press the hotkey again (or push the
+   cursor back across the edge) to bring it back.
 5. Text copied on one side appears on the other side's pasteboard
    (≤ 1 MiB, concealment types excluded).
 
@@ -148,11 +154,11 @@ Details, threat model and explicit non-goals: [docs/SECURITY.md](docs/SECURITY.m
 
 ## Status
 
-v1 targets macOS 13+ (server or client) and Windows 10+ (server or client),
-one active client per server. Deliberately not included: clipboard images,
-audio/notification sync, Linux/Wayland shells, and forwarding physical input
-from the client back to the server (single-master). Platform quirks — secure
-input fields, UIPI, mixed-DPI feel, keyboard layouts — are documented in
+v1 targets macOS 13+ and Windows 10+ in either role, one active peer per
+server. Deliberately not included: clipboard images, audio/notification sync,
+and Linux/Wayland shells. Input is bidirectional (either keyboard/mouse can
+drive the focused screen). Platform quirks — secure input fields, UIPI,
+mixed-DPI feel, keyboard layouts — are documented in
 [docs/PLATFORM-LIMITS.md](docs/PLATFORM-LIMITS.md).
 
 ## Documentation

@@ -8,19 +8,16 @@ import Foundation
 /// from any thread (typically the core's runtime).
 public final class Injector {
 
-    /// Called when the user pushes the cursor over the return edge while
-    /// being controlled — the shell should ask the server for control back.
-    public var onReturnControl: (() -> Void)?
-
     private let queue = DispatchQueue(label: "app.flowlink.injector")
-    private let source = CGEventSource(stateID: .hidSystemState)
+    /// Events are posted from a *private* source state so our own event tap
+    /// can tell them apart from physical hardware and never forwards them
+    /// back to the peer (which would loop input).
+    private let source = CGEventSource(stateID: .privateState)
 
     // State — queue-only.
     private var pressedKeys = Set<UInt16>()
     private var pressedButtons = Set<UInt8>()
     private var heldModifiers: UInt8 = 0
-    private var returnEdge: FLEdge?
-    private var suspended = false
     private var cursorHidden = false
     private var metrics = ScreenMetrics.fallback
 
@@ -42,27 +39,12 @@ public final class Injector {
         }
     }
 
-    public func showCursor(at edge: FLEdge?) {
+    public func showCursor() {
         queue.async { [weak self] in
-            guard let self else { return }
-            if self.cursorHidden {
-                CGDisplayShowCursor(CGMainDisplayID())
-                self.cursorHidden = false
-            }
-            guard let edge else { return }
+            guard let self, self.cursorHidden else { return }
+            CGDisplayShowCursor(CGMainDisplayID())
+            self.cursorHidden = false
             self.metrics = ScreenGeometry.unionMetrics()
-            // Warp a comfortable distance inside the edge so the core's edge
-            // tracker re-arms and the user can immediately push out again.
-            let margin = 24.0
-            let current = CGEvent(source: nil)?.location ?? .zero
-            var target = current
-            switch edge {
-            case .left: target.x = self.metrics.origin.x + margin
-            case .right: target.x = self.metrics.origin.x + self.metrics.width - margin
-            case .top: target.y = self.metrics.origin.y + margin
-            case .bottom: target.y = self.metrics.origin.y + self.metrics.height - margin
-            }
-            CGWarpMouseCursorPosition(target)
         }
     }
 
@@ -98,21 +80,19 @@ public final class Injector {
         metrics = ScreenGeometry.unionMetrics()
         let serverEdge = edge(from: event.flags)
         let along = max(0.0, min(1.0, event.x))
-        // Land a few pixels *inside* the edge. Landing exactly on the
-        // boundary made the first sideways/zero-delta event look like a
-        // deliberate push back, which froze the pointer.
+        // Land a few pixels *inside* the edge so ordinary sideways motion is
+        // not mistaken for an edge push.
         let inset = 6.0
         let local: CGPoint
         switch serverEdge {
-        // Exited the server to the right → appears at the local left edge.
+        // The cursor continues in the same direction: it enters through the
+        // mirrored side of this screen.
         case .right: local = CGPoint(x: inset, y: along * metrics.height)
         case .left: local = CGPoint(x: metrics.width - inset, y: along * metrics.height)
         case .top: local = CGPoint(x: along * metrics.width, y: metrics.height - inset)
         case .bottom: local = CGPoint(x: along * metrics.width, y: inset)
         }
         CGWarpMouseCursorPosition(metrics.global(local))
-        returnEdge = serverEdge.opposite
-        suspended = false
     }
 
     private func handleKey(_ event: FlInputEvent) {
@@ -140,22 +120,6 @@ public final class Injector {
         let current = CGEvent(source: nil)?.location ?? .zero
         let target = CGPoint(x: current.x + event.x, y: current.y + event.y)
 
-        // Return control only when the pointer is on the return edge *and*
-        // still being pushed outwards — being parked near the edge must not
-        // hand control back on a sideways or zero-delta event.
-        if !suspended, let edge = returnEdge,
-           Self.isReturnPush(
-               edge: edge,
-               target: target,
-               delta: CGPoint(x: event.x, y: event.y),
-               metrics: metrics
-           ) {
-            suspended = true
-            returnEdge = nil
-            onReturnControl?()
-        }
-        guard !suspended else { return }
-
         let type: CGEventType
         if pressedButtons.contains(1) {
             type = .leftMouseDragged
@@ -173,27 +137,6 @@ public final class Injector {
             mouseButton: .left
         )
         cgEvent?.post(tap: .cghidEventTap)
-    }
-
-    /// True when the pointer sits on the return edge *and* the user is still
-    /// pushing outwards. Pure so it can be unit-tested.
-    static func isReturnPush(
-        edge: FLEdge,
-        target: CGPoint,
-        delta: CGPoint,
-        metrics: ScreenMetrics
-    ) -> Bool {
-        let epsilon = 0.5
-        switch edge {
-        case .left:
-            return target.x <= metrics.origin.x && delta.x < -epsilon
-        case .right:
-            return target.x >= metrics.origin.x + metrics.width && delta.x > epsilon
-        case .top:
-            return target.y <= metrics.origin.y && delta.y < -epsilon
-        case .bottom:
-            return target.y >= metrics.origin.y + metrics.height && delta.y > epsilon
-        }
     }
 
     private func handleMouseButton(_ event: FlInputEvent) {

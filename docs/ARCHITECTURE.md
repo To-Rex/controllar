@@ -51,27 +51,46 @@ One `Engine` instance owns the runtime:
   typed code in `pending_pair_code`, which the session's pairing flow polls
   at least every 250 ms (no startup races).
 
-### Input path
+### Input path — the symmetric focus model
 
-Server (drives the peer):
+Either computer can drive the link: the *shared cursor* lives on exactly one
+screen at a time (`focused`), and every physical keyboard/mouse is routed to
+whichever screen shows it. Both roles behave identically; server/client only
+decides who listens.
 
 ```
-native capture ──► Cmd::HostInput ──► hotkey match? ── yes ─► toggle remote
-                                       │ no
-                    remote inactive ───┴──► EdgeTracker.feed(edge, screen, x, y, dx, dy)
-                    remote active  ────────► MoveCoalescer ──► Message::Input(MouseMove)
-                                              Key/Button/Scroll ──► Message::Input(…)
+focused side:
+  native capture ──► Cmd::HostInput ──► hotkey? ── yes ─► toggle focus
+                                  │ no
+                                  ├─► EdgeTracker.feed(edge, ...) ─► Enter sent,
+                                  │                                 forwarding starts
+                                  └─ (other events: used locally by the OS)
+
+unfocused side (cursor is on the peer):
+  native capture ──► Cmd::HostInput ──► MoveCoalescer ──► Message::Input(MouseMove)
+                                        Key/Button/Scroll ──► Message::Input(…)
+  incoming Message::Input ──► ignored (the cursor is elsewhere)
+
+focus transfer:
+  focused side crosses its edge ──► InputEvent::Enter { edge, along } ──► peer
+  peer, while focused, presses the hotkey ──► Message::Reclaim ──► focused side
+                                             releases (Enter goes the other way
+                                             on its next edge push)
 ```
 
 `HostInput::MouseMove` carries the absolute cursor position (union-screen
 pixels) plus the pixel delta; `EdgeTracker` activates once when the cursor is
 on the configured edge and pushing outward (`REARM_MARGIN_PX = 3.0`,
-`PUSH_EPSILON_PX = 0.4`), sending `InputEvent::Enter { edge, along_norm }`.
-While active, moves go through the coalescer (flush at most every 4 ms; an
-8 ms flusher task covers the tail) and all other events are forwarded
-directly. Releasing control sends `InputEvent::ReleaseAll` to the peer (so it
-drops held keys/buttons) and re-arms the edge tracker; on the client,
-`RequestControl` releases locally and sends `Reclaim` to the server.
+`PUSH_EPSILON_PX = 0.4`), sending `InputEvent::Enter { edge, along_norm }` and
+starting to forward. While forwarding, moves go through the coalescer (flush
+at most every 4 ms; an 8 ms flusher covers the tail) and all other events are
+forwarded directly. Any focus switch sends `InputEvent::ReleaseAll` locally so
+no key or button stays held. The shell hides the physical cursor while
+forwarding and passes events through while focused.
+
+Because `Input` flows both ways, the keyboard on either desk types into the
+focused screen and either mouse moves the shared cursor — the "one body"
+behavior.
 
 Client (is driven):
 

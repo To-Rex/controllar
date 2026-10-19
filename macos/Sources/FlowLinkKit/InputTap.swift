@@ -9,8 +9,8 @@ public final class TapSharedState {
     private var storage = Snapshot()
 
     public struct Snapshot {
-        public var mode: FLMode = .server
-        public var remoteActive = false
+        /// This Mac's input is currently sent to the other computer.
+        public var forwarding = false
         public var hotkeyModifiers: UInt8 = 0
         public var hotkeyUsage: UInt16 = 0x2C
         public var metrics: ScreenMetrics = .fallback
@@ -121,7 +121,16 @@ public final class InputTap {
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let pass = Unmanaged.passUnretained(event)
         let state = shared.snapshot()
-        let isServer = state.mode == .server
+
+        // Never forward synthetic events (our own injection, other automation)
+        // — that would loop input back to the peer. They are also never
+        // swallowed: the app that produced them expects local delivery.
+        if type != .tapDisabledByTimeout, type != .tapDisabledByUserInput,
+           event.getIntegerValueField(.eventSourceStateID)
+               != Int64(CGEventSourceStateID.hidSystemState.rawValue)
+        {
+            return pass
+        }
 
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
@@ -146,12 +155,8 @@ public final class InputTap {
                 return nil
             }
 
-            if isServer {
-                onInput?(makeKey(usage: usage, down: down, modifiers: modifiers))
-                return state.remoteActive ? nil : pass
-            }
-            // Client: physical keys keep working locally; hotkey only.
-            return pass
+            onInput?(makeKey(usage: usage, down: down, modifiers: modifiers))
+            return state.forwarding ? nil : pass
 
         case .flagsChanged:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -165,25 +170,18 @@ public final class InputTap {
                 down = true
             }
             let modifiers = KeyCodes.modifiers(from: event.flags)
-            if isServer {
-                onInput?(makeKey(usage: usage, down: down, modifiers: modifiers))
-                return state.remoteActive ? nil : pass
-            }
-            return pass
+            onInput?(makeKey(usage: usage, down: down, modifiers: modifiers))
+            return state.forwarding ? nil : pass
 
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            if isServer {
-                let point = state.metrics.normalized(event.location)
-                let dx = Double(event.getIntegerValueField(.mouseEventDeltaX))
-                let dy = Double(event.getIntegerValueField(.mouseEventDeltaY))
-                onInput?(makeMove(x: point.x, y: point.y, dx: dx, dy: dy))
-                return state.remoteActive ? nil : pass
-            }
-            return pass
+            let point = state.metrics.normalized(event.location)
+            let dx = Double(event.getIntegerValueField(.mouseEventDeltaX))
+            let dy = Double(event.getIntegerValueField(.mouseEventDeltaY))
+            onInput?(makeMove(x: point.x, y: point.y, dx: dx, dy: dy))
+            return state.forwarding ? nil : pass
 
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
-            guard isServer else { return pass }
             let button: UInt16
             switch type {
             case .leftMouseDown, .leftMouseUp: button = 1
@@ -193,10 +191,9 @@ public final class InputTap {
             let down = type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown
             let modifiers = KeyCodes.modifiers(from: event.flags)
             onInput?(makeButton(button: button, down: down, modifiers: modifiers))
-            return state.remoteActive ? nil : pass
+            return state.forwarding ? nil : pass
 
         case .scrollWheel:
-            guard isServer else { return pass }
             // Wire units: notches for discrete wheels (one per physical
             // tick), pixels for trackpads (`precise`). Positive dy = wheel up
             // (away from the user), matching kCGScrollWheelEventDeltaAxis1.
@@ -211,7 +208,7 @@ public final class InputTap {
                 dx = event.getDoubleValueField(.scrollWheelEventDeltaAxis2)
             }
             onInput?(makeScroll(dx: dx, dy: dy, precise: precise))
-            return state.remoteActive ? nil : pass
+            return state.forwarding ? nil : pass
 
         default:
             return pass

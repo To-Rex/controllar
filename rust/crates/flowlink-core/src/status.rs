@@ -140,7 +140,14 @@ pub struct Status {
     pub pairing: Option<PairingStatus>,
     /// Server: we currently drive the remote cursor.
     /// Client: we are being driven (remote cursor is here).
+    /// Deprecated alias of [`Status::forwarding`] kept for older shells.
     pub remote_active: bool,
+    /// This side owns the shared cursor: local input is used locally and the
+    /// configured edge hands the cursor to the peer.
+    pub focused: bool,
+    /// This side's input is being captured and forwarded to the peer (the
+    /// shared cursor is on the other computer).
+    pub forwarding: bool,
     /// Client: the server edge the cursor entered from (also the edge to push
     /// to give control back).
     pub remote_edge: Option<Edge>,

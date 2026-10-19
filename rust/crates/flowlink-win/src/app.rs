@@ -23,7 +23,7 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use flowlink_core::engine::{Cmd, Engine};
 use flowlink_core::host::Host;
-use flowlink_core::types::{Edge, HostInput, Hotkey, InputEvent, Mode, Modifiers};
+use flowlink_core::types::{Edge, Hotkey, InputEvent, Mode, Modifiers};
 use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -155,6 +155,10 @@ pub struct StatusMirror {
     pub peer: Option<PeerMirror>,
     pub pairing: Option<PairingMirror>,
     pub remote_active: bool,
+    /// This side owns the shared cursor.
+    pub focused: bool,
+    /// This side's input is forwarded to the peer.
+    pub forwarding: bool,
     pub remote_edge: Option<Edge>,
     pub edge: Option<Edge>,
     pub clipboard_enabled: bool,
@@ -277,22 +281,22 @@ impl AppShared {
     }
 
     /// Store a status snapshot and propagate the parts the platform threads
-    /// need (mode, remote state, hotkey).
+    /// need (forwarding state, clipboard, hotkey).
     fn apply_status(&self, status: StatusMirror) {
         {
             let mut capture = self.capture.write();
-            capture.mode_is_server = status.is_server();
+            capture.forwarding = status.forwarding;
             capture.clipboard_enabled = status.clipboard_enabled;
             capture.remote_edge = status.remote_edge;
             capture.hotkey_mods = status.hotkey.modifiers;
             capture.hotkey_usage = status.hotkey.usage;
         }
-        let was_active = self.status.read().remote_active;
-        let now_active = status.remote_active;
+        let was_forwarding = self.status.read().forwarding;
+        let now_forwarding = status.forwarding;
         *self.status.write() = status;
-        if was_active != now_active {
-            // Cursor visibility follows remote control in both roles.
-            input::update_remote_active(now_active);
+        if was_forwarding != now_forwarding {
+            // Cursor visibility follows forwarding in both roles.
+            input::update_forwarding(now_forwarding);
         }
     }
 }
@@ -1077,9 +1081,11 @@ impl WinApp {
         card(ui, theme, |ui| {
             card_title(ui, theme, "Screen edge");
             ui.label(
-                egui::RichText::new("Push the pointer through this edge to control the peer.")
-                    .size(11.0)
-                    .color(theme.text_dim),
+                egui::RichText::new(
+                    "The edge of this screen that faces the other computer — crossing it moves the shared cursor there.",
+                )
+                .size(11.0)
+                .color(theme.text_dim),
             );
             ui.add_space(6.0);
             let current = status.edge();
@@ -1132,21 +1138,22 @@ impl WinApp {
             }
 
             ui.add_space(6.0);
-            let mut control = status.remote_active;
+            let mut focused = status.focused;
             if ui
-                .checkbox(&mut control, "Keyboard & mouse control")
+                .checkbox(&mut focused, "The cursor is on this computer")
                 .changed()
             {
-                self.toggle_remote_control(status);
+                self.toggle_remote_control();
             }
-            let hint = if status.remote_active {
+            let hint = if status.focused {
                 format!(
-                    "Controlling the peer now — {} or the edge brings it back",
+                    "The cursor is here — push it through the {} edge or press {} to send it to the other computer",
+                    edge_title(status.edge()),
                     hotkey_label(status.hotkey)
                 )
             } else {
                 format!(
-                    "Toggle with {} or by pushing the pointer through the edge",
+                    "The cursor is on the other computer — press {} to bring it back here",
                     hotkey_label(status.hotkey)
                 )
             };
@@ -1396,26 +1403,18 @@ impl WinApp {
                     .color(theme.text_dim),
                 );
             }
-            if status.remote_active {
+            if status.forwarding {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "The peer is driving this screen — push the pointer back through the {} edge, or press {}",
-                        status
-                            .remote_edge
-                            .map(|edge| {
-                                // `remote_edge` is the *server* edge; the local
-                                // one to push through is its mirror image.
-                                flowlink_core::edge::return_edge(edge).as_str()
-                            })
-                            .unwrap_or("screen"),
+                        "The cursor is on the other computer — your keyboard and mouse drive it there. Push the cursor back across the edge facing this screen or press {} to bring it here.",
                         hotkey_label(status.hotkey)
                     ))
                     .size(11.0)
-                    .color(theme.warn),
+                    .color(theme.text_dim),
                 );
-                if ui.button("Take back control").clicked() {
-                    self.engine.execute(Cmd::RequestControl);
+                if ui.button("Bring the cursor here").clicked() {
+                    self.engine.execute(Cmd::ToggleControl);
                 }
             }
             if status.is_running() && ui.button("Disconnect").clicked() {
@@ -1609,15 +1608,10 @@ impl WinApp {
         metrics_card(ui, theme, status);
     }
 
-    /// Ask the engine to toggle remote control — the same code path the
-    /// hotkey takes, so the core stays the single owner of the decision (it
-    /// also reports "not connected" itself).
-    fn toggle_remote_control(&self, status: &StatusMirror) {
-        self.engine.execute(Cmd::HostInput(HostInput::Key {
-            usage: status.hotkey.usage,
-            down: true,
-            modifiers: Modifiers::from_bits(status.hotkey.modifiers),
-        }));
+    /// Ask the engine to move the shared cursor here/there. The core owns the
+    /// decision, so both the UI button and the hotkey take the same path.
+    fn toggle_remote_control(&self) {
+        self.engine.execute(Cmd::ToggleControl);
     }
 
     /// Issue a `Connect` command for a discovered or remembered device.

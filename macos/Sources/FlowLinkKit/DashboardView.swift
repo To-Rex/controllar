@@ -159,7 +159,7 @@ public struct DashboardView: View {
                 Spacer()
                 HStack(spacing: 5) {
                     Circle().fill(DS.ok).frame(width: 7, height: 7)
-                    Text(model.status?.remoteActive == true ? "Driving" : "Idle")
+                    Text(model.status?.ownsCursor == true ? "Cursor here" : "Cursor on peer")
                         .font(.system(.caption, weight: .semibold))
                         .foregroundStyle(DS.ok)
                 }
@@ -290,9 +290,9 @@ public struct DashboardView: View {
 
     private var clientHintCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("While connected")
-            bullet("cursorarrow.motionlines", "Push the cursor over the edge it entered from to send control back.")
-            bullet("keyboard", "Your keyboard keeps working locally; local input is never forwarded.")
+            SectionHeader("One keyboard, two screens")
+            bullet("cursorarrow.motionlines", "The cursor lives on one screen at a time. Push it through the edge facing the other computer — or press the hotkey — to move it there.")
+            bullet("keyboard", "The keyboard on either desk types into the screen that shows the cursor.")
             bullet("doc.on.clipboard", "Clipboard syncs both ways automatically.")
         }
         .frame(maxWidth: .infinity)

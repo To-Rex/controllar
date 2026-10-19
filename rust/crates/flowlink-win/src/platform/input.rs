@@ -65,11 +65,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// One wheel notch, in `mouseData` units on Windows.
 const WHEEL_DELTA: f64 = 120.0;
 
-/// How far the pointer must travel away from the entry edge before the
-/// return-edge check arms again (mirrors `flowlink_core::edge`'s re-arm
-/// margin, so the two state machines agree on what "left the edge" means).
-const REARM_MARGIN_PX: f64 = 3.0;
-
 /// `VK_SHIFT`, `VK_CONTROL`, `VK_MENU`, `VK_LWIN` — the keys we press to make
 /// the injected modifier state match the peer's.
 const MODIFIER_VKS: [(u8, u16); 4] = [
@@ -89,13 +84,11 @@ const MODIFIER_VKS: [(u8, u16); 4] = [
 pub struct CaptureState {
     /// UI switch: when false the hooks let everything through untouched.
     pub capture_enabled: bool,
-    /// True while the engine runs as the server (drives the peer).
-    pub mode_is_server: bool,
-    /// True while remote control is active in either direction.
-    pub remote_active: bool,
-    /// Client only: the server edge the cursor entered from. The local edge
-    /// to push for giving control back is its opposite (see
-    /// [`flowlink_core::edge::return_edge`]).
+    /// True while this side's input is forwarded to the other computer (the
+    /// shared cursor is on the other screen).
+    pub forwarding: bool,
+    /// Local pointer geometry is used by the edge tracker; the value itself
+    /// is only informational here.
     pub remote_edge: Option<Edge>,
     /// Clipboard syncing enabled (read by the clipboard poller).
     pub clipboard_enabled: bool,
@@ -109,8 +102,7 @@ impl Default for CaptureState {
         let hotkey = flowlink_core::types::Hotkey::default();
         CaptureState {
             capture_enabled: true,
-            mode_is_server: true,
-            remote_active: false,
+            forwarding: false,
             remote_edge: None,
             clipboard_enabled: true,
             hotkey_mods: hotkey.modifiers,
@@ -208,13 +200,13 @@ fn virtual_origin() -> (i32, i32) {
 }
 
 /// Update the engine snapshot used by the hook thread and hide/show the local
-/// cursor while the remote side is in control.
-pub fn update_remote_active(active: bool) {
+/// cursor while this side's input is forwarded to the other computer.
+pub fn update_forwarding(forwarding: bool) {
     if let Some(state) = CAPTURE_STATE.get() {
-        state.write().remote_active = active;
+        state.write().forwarding = forwarding;
     }
     let mut injection = INJECTION.lock();
-    set_cursor_hidden(&mut injection, active);
+    set_cursor_hidden(&mut injection, forwarding);
 }
 
 /// Enable/disable hook processing (UI switch or shutdown).
@@ -378,20 +370,18 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     };
     let mods = super::hid::modifiers_from_vk_states();
     let is_hotkey = snapshot.is_hotkey(usage, mods);
-    // Keys are forwarded for the hotkey (always) and while the server drives
-    // the remote machine. On the client everything typed locally stays local.
-    let remote_owns_keys = snapshot.mode_is_server && snapshot.remote_active;
 
-    if is_hotkey || remote_owns_keys {
-        engine.execute(Cmd::HostInput(HostInput::Key {
-            usage,
-            down,
-            modifiers: Modifiers::from_bits(mods),
-        }));
-    }
+    // Every key is fed to the engine: while this side owns the cursor the
+    // engine ignores it (the shell passes it through), while the cursor is on
+    // the peer the engine forwards it there.
+    engine.execute(Cmd::HostInput(HostInput::Key {
+        usage,
+        down,
+        modifiers: Modifiers::from_bits(mods),
+    }));
 
-    // Swallow the hotkey (it is ours) and anything the remote machine owns.
-    if is_hotkey || remote_owns_keys {
+    // Swallow the hotkey (it is ours) and anything sent to the peer.
+    if is_hotkey || snapshot.forwarding {
         return LRESULT(1);
     }
     pass_through(code, wparam, lparam)
@@ -416,40 +406,33 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return pass_through(code, wparam, lparam);
     }
 
-    // Only the server feeds the edge tracker / forwards pointer input; on the
-    // client the local pointer is irrelevant while being driven.
-    let server = snapshot.mode_is_server;
-
+    // Every pointer event is fed to the engine: the focused side uses it for
+    // edge detection, the other side forwards it to the peer.
     match wparam.0 as u32 {
         WM_MOUSEMOVE => {
             let (dx, dy) = mouse_delta(info.pt.x, info.pt.y);
-            if server {
-                // While driving the peer the physical pointer is clamped at
-                // the desktop edges. Position-based deltas then read as zero
-                // and the remote cursor freezes (keyboard keeps working, so
-                // it looks like "the cursor doesn't move"). Keep the hidden
-                // pointer inside a runway so deltas always flow.
-                if snapshot.remote_active {
-                    recenter_if_outside_runway();
-                }
-                let (origin_x, origin_y) = virtual_origin();
-                engine.execute(Cmd::HostInput(HostInput::MouseMove {
-                    x_px: (info.pt.x - origin_x) as f64,
-                    y_px: (info.pt.y - origin_y) as f64,
-                    dx,
-                    dy,
-                }));
+            // While forwarding, the physical pointer is clamped at the
+            // desktop edges. Position-based deltas then read as zero and the
+            // remote cursor freezes (keyboard keeps working, so it looks like
+            // "the cursor doesn't move"). Keep the hidden pointer inside a
+            // runway so deltas always flow.
+            if snapshot.forwarding {
+                recenter_if_outside_runway();
             }
-            if server && snapshot.remote_active {
+            let (origin_x, origin_y) = virtual_origin();
+            engine.execute(Cmd::HostInput(HostInput::MouseMove {
+                x_px: (info.pt.x - origin_x) as f64,
+                y_px: (info.pt.y - origin_y) as f64,
+                dx,
+                dy,
+            }));
+            if snapshot.forwarding {
                 return LRESULT(1);
             }
             pass_through(code, wparam, lparam)
         }
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
         | WM_MBUTTONUP => {
-            if !(server && snapshot.remote_active) {
-                return pass_through(code, wparam, lparam);
-            }
             let button = match wparam.0 as u32 {
                 WM_LBUTTONDOWN | WM_LBUTTONUP => MouseButton::Left,
                 WM_RBUTTONDOWN | WM_RBUTTONUP => MouseButton::Right,
@@ -467,12 +450,12 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 down,
                 modifiers: Modifiers::from_bits(super::hid::modifiers_from_vk_states()),
             }));
-            LRESULT(1)
+            if snapshot.forwarding {
+                return LRESULT(1);
+            }
+            pass_through(code, wparam, lparam)
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
-            if !(server && snapshot.remote_active) {
-                return pass_through(code, wparam, lparam);
-            }
             // `mouseData` carries a signed delta in the high word; one notch =
             // 120 units. Wire convention (docs/PROTOCOL.md): positive `dy` =
             // wheel away from the user (up) — the same sign Windows uses for
@@ -492,7 +475,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 // available over these hook messages.
                 precise: false,
             }));
-            LRESULT(1)
+            if snapshot.forwarding {
+                return LRESULT(1);
+            }
+            pass_through(code, wparam, lparam)
         }
         _ => pass_through(code, wparam, lparam),
     }
@@ -566,13 +552,6 @@ struct InjectionState {
     mods_down: u8,
     /// HID button usages (1/2/4) currently held down by the peer.
     pressed_buttons: HashSet<u8>,
-    /// Client: local edge the remote cursor must be pushed through.
-    return_edge: Option<Edge>,
-    /// Client: false until the cursor left the entry edge (hysteresis).
-    return_armed: bool,
-    /// Client: true once control was requested, until the engine confirms the
-    /// session ended (prevents a burst of duplicate `RequestControl`s).
-    return_sent: bool,
     /// Whether [`set_cursor_hidden`] currently holds the cursor hidden.
     cursor_hidden: bool,
 }
@@ -584,13 +563,12 @@ static INJECTION: LazyLock<Mutex<InjectionState>> =
 pub fn inject(event: &InputEvent) {
     let mut state = INJECTION.lock();
     match *event {
-        InputEvent::Enter { edge, along_norm } => enter(&mut state, edge, along_norm),
+        InputEvent::Enter { edge, along_norm } => enter(edge, along_norm),
         InputEvent::MouseMove { dx, dy } => {
             let (dx, dy) = (dx.round() as i32, dy.round() as i32);
             if dx != 0 || dy != 0 {
                 send(&[mouse_input(dx, dy, MOUSEEVENTF_MOVE, 0)]);
             }
-            check_return_edge(&mut state);
         }
         InputEvent::MouseButton { button, down, .. } => button_event(&mut state, button, down),
         InputEvent::Scroll { dx, dy, precise } => scroll(dx, dy, precise),
@@ -604,7 +582,7 @@ pub fn inject(event: &InputEvent) {
 }
 
 /// Place the pointer at the mirrored entry position for `edge`.
-fn enter(state: &mut InjectionState, edge: Edge, along_norm: f32) {
+fn enter(edge: Edge, along_norm: f32) {
     let screen = local_screen();
     let (x, y) = flowlink_core::edge::enter_position(edge, along_norm, screen);
     let (origin_x, origin_y) = virtual_origin();
@@ -616,89 +594,6 @@ fn enter(state: &mut InjectionState, edge: Edge, along_norm: f32) {
     let result = unsafe { SetCursorPos(target_x, target_y) };
     if let Err(err) = result {
         warn!("SetCursorPos({target_x}, {target_y}) failed: {err}");
-    }
-
-    // The cursor appeared at the local edge opposite to `edge`; pushing it
-    // back through *that* edge returns control. `edge` is the *server* edge
-    // (see `flowlink_core::edge::enter_position`), so the local edge is its
-    // opposite.
-    state.return_edge = Some(flowlink_core::edge::return_edge(edge));
-    state.return_armed = false;
-    state.return_sent = false;
-    set_cursor_hidden(state, true);
-}
-
-/// Client-side: return control when the remote cursor is pushed back out of
-/// the local edge it entered through.
-///
-/// `remote_edge` in the status snapshot is the *server* edge, so the local
-/// edge to watch is its opposite — see [`flowlink_core::edge::enter_position`].
-/// The `Enter` event already carries the authoritative edge; the status field
-/// only serves as a fallback (e.g. when this shell missed the event).
-fn check_return_edge(state: &mut InjectionState) {
-    // Read the snapshot without holding the injection lock (the write side is
-    // taken from engine threads).
-    let snapshot = CAPTURE_STATE.get().map(|shared| *shared.read());
-    if !snapshot
-        .map(|snapshot| snapshot.remote_active)
-        .unwrap_or(false)
-    {
-        state.return_sent = false;
-    }
-    if state.return_sent {
-        return;
-    }
-    let edge = state.return_edge.or_else(|| {
-        let snapshot = snapshot?;
-        if snapshot.remote_active {
-            snapshot.remote_edge.map(flowlink_core::edge::return_edge)
-        } else {
-            None
-        }
-    });
-    let Some(edge) = edge else {
-        return;
-    };
-
-    let mut point = POINT::default();
-    // SAFETY: the pointer is valid for writes and `point` outlives the call.
-    if unsafe { GetCursorPos(&mut point) }.is_err() {
-        return;
-    }
-    let (origin_x, origin_y) = virtual_origin();
-    let x = (point.x - origin_x) as f64;
-    let y = (point.y - origin_y) as f64;
-    let screen = local_screen();
-
-    // Same hysteresis as the server-side tracker: do not trip right after the
-    // pointer was warped onto the edge.
-    if !state.return_armed {
-        let inside = match edge {
-            Edge::Left => x > REARM_MARGIN_PX,
-            Edge::Right => x < screen.width - REARM_MARGIN_PX,
-            Edge::Top => y > REARM_MARGIN_PX,
-            Edge::Bottom => y < screen.height - REARM_MARGIN_PX,
-        };
-        if inside {
-            state.return_armed = true;
-        }
-        return;
-    }
-
-    let at_edge = match edge {
-        Edge::Left => x <= 0.0,
-        Edge::Right => x >= screen.width - 1.0,
-        Edge::Top => y <= 0.0,
-        Edge::Bottom => y >= screen.height - 1.0,
-    };
-    if at_edge {
-        // One-shot until the next `Enter` / the end of the session.
-        state.return_edge = None;
-        state.return_armed = false;
-        state.return_sent = true;
-        if let Some(engine) = ENGINE.get() {
-            engine.execute(Cmd::RequestControl);
-        }
     }
 }
 
@@ -813,8 +708,6 @@ fn release_all_inner(state: &mut InjectionState) {
         };
         send(&[mouse_input(0, 0, flags, 0)]);
     }
-    state.return_edge = None;
-    state.return_armed = false;
     set_cursor_hidden(state, false);
 }
 

@@ -109,6 +109,8 @@ pub struct Engine {
     pub move_coalescer: Mutex<MoveCoalescer>,
     pub edge_tracker: Mutex<EdgeTracker>,
     pub local_screen: Mutex<ScreenInfo>,
+    /// True while this side owns the shared cursor (see [`Status::focused`]).
+    pub focused: AtomicBool,
     /// Client role: a pairing code from the UI, waiting for the session to
     /// consume it (avoids any startup race with the session task).
     pub pending_pair_code: Mutex<Option<String>>,
@@ -159,6 +161,7 @@ impl Engine {
             move_coalescer: Mutex::new(MoveCoalescer::default_profile()),
             edge_tracker: Mutex::new(EdgeTracker::new()),
             local_screen: Mutex::new(ScreenInfo::default()),
+            focused: AtomicBool::new(false),
             devices: Mutex::new(HashMap::new()),
             session: Mutex::new(None),
             pairing: Mutex::new(None),
@@ -208,6 +211,8 @@ impl Engine {
             peer: None,
             pairing: None,
             remote_active: false,
+            focused: false,
+            forwarding: false,
             remote_edge: None,
             edge: cfg.edge,
             clipboard_enabled: cfg.clipboard_enabled,
@@ -455,10 +460,11 @@ impl Engine {
                 self.handle_host_input(ev);
             }
             Cmd::RequestControl => {
-                self.request_control();
+                // "Take the cursor back" from the UI/hotkey on this side.
+                self.take_focus();
             }
             Cmd::ToggleControl => {
-                self.toggle_remote();
+                self.toggle_focus();
             }
             Cmd::SetClipboardText(text) => {
                 self.handle_local_clipboard(&text);
@@ -633,6 +639,8 @@ impl Engine {
             status.peer = None;
             status.pairing = None;
             status.remote_active = false;
+            status.focused = false;
+            status.forwarding = false;
             status.remote_edge = None;
             status.listening = false;
         }
@@ -645,13 +653,26 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------
-    // Host input handling (server role drives the edge state machine)
+    // Input routing (symmetric "one body" focus model)
     // -----------------------------------------------------------------
+    //
+    // Exactly one side owns the shared cursor at a time (`focused`):
+    //
+    // * the focused side uses its local input locally and hands the cursor to
+    //   the peer when the pointer crosses its configured edge;
+    // * the other side captures all of its input and forwards it, while the
+    //   focused side injects it — so either keyboard/mouse drives whichever
+    //   screen currently shows the cursor;
+    // * the hotkey on either side moves the cursor here/there, and a
+    //   `Reclaim` from the peer asks the focused side to let go.
 
     fn handle_host_input(self: &Arc<Self>, ev: HostInput) {
-        let mode = self.cfg.lock().mode;
+        // Input only means something while a peer session is live.
+        if !self.has_session() || self.status.lock().state != ConnState::Connected {
+            return;
+        }
 
-        // Hotkey is checked first, in both roles.
+        // Hotkey first, on both sides.
         if let HostInput::Key {
             usage,
             down: true,
@@ -660,46 +681,37 @@ impl Engine {
         {
             let hotkey = self.cfg.lock().hotkey;
             if hotkey.matches(usage, modifiers) {
-                match mode {
-                    Mode::Server => self.toggle_remote(),
-                    Mode::Client => {
-                        if self.status.lock().remote_active {
-                            self.execute(Cmd::RequestControl);
-                        }
-                    }
-                }
+                self.toggle_focus();
                 return;
             }
         }
 
-        if mode != Mode::Server {
-            return;
-        }
-        // Edge control only makes sense while a peer session is live.
-        if !self.has_session() {
+        if self.focused.load(Ordering::Relaxed) {
+            // Cursor is here: local input is applied by the OS (the shell
+            // passes events through) and only edge crossings matter.
+            if let HostInput::MouseMove { x_px, y_px, dx, dy } = ev {
+                let edge = self.cfg.lock().edge;
+                let screen = *self.local_screen.lock();
+                if self
+                    .edge_tracker
+                    .lock()
+                    .feed(edge, screen, x_px, y_px, dx, dy)
+                {
+                    let along = edge::along_norm(edge, screen, x_px, y_px);
+                    self.give_focus(edge, along);
+                }
+            }
             return;
         }
 
-        let remote_active = self.status.lock().remote_active;
+        // Cursor is on the peer: capture and forward everything.
         match ev {
-            HostInput::MouseMove { x_px, y_px, dx, dy } => {
-                if !remote_active {
-                    let edge = self.cfg.lock().edge;
-                    let screen = *self.local_screen.lock();
-                    let activate = self
-                        .edge_tracker
-                        .lock()
-                        .feed(edge, screen, x_px, y_px, dx, dy);
-                    if activate {
-                        self.activate_remote(edge, screen, x_px, y_px);
-                    }
-                } else {
-                    let now = util::now_ms();
-                    let flush = self.move_coalescer.lock().push(dx, dy, now);
-                    if let Some((dx, dy)) = flush {
-                        if dx != 0.0 || dy != 0.0 {
-                            self.push_to_peer(Message::Input(InputEvent::MouseMove { dx, dy }));
-                        }
+            HostInput::MouseMove { dx, dy, .. } => {
+                let now = util::now_ms();
+                let flush = self.move_coalescer.lock().push(dx, dy, now);
+                if let Some((dx, dy)) = flush {
+                    if dx != 0.0 || dy != 0.0 {
+                        self.push_to_peer(Message::Input(InputEvent::MouseMove { dx, dy }));
                     }
                 }
             }
@@ -708,117 +720,115 @@ impl Engine {
                 down,
                 modifiers,
             } => {
-                if remote_active {
-                    self.push_to_peer(Message::Input(InputEvent::Key {
-                        usage,
-                        down,
-                        modifiers,
-                    }));
-                }
+                self.push_to_peer(Message::Input(InputEvent::Key {
+                    usage,
+                    down,
+                    modifiers,
+                }));
             }
             HostInput::MouseButton {
                 button,
                 down,
                 modifiers,
             } => {
-                if remote_active {
-                    self.push_to_peer(Message::Input(InputEvent::MouseButton {
-                        button,
-                        down,
-                        modifiers,
-                    }));
-                }
+                self.push_to_peer(Message::Input(InputEvent::MouseButton {
+                    button,
+                    down,
+                    modifiers,
+                }));
             }
             HostInput::Scroll { dx, dy, precise } => {
-                if remote_active {
-                    self.push_to_peer(Message::Input(InputEvent::Scroll {
-                        dx: dx as f32,
-                        dy: dy as f32,
-                        precise,
-                    }));
-                }
+                self.push_to_peer(Message::Input(InputEvent::Scroll {
+                    dx: dx as f32,
+                    dy: dy as f32,
+                    precise,
+                }));
             }
         }
     }
 
-    /// Begin driving the remote device through `edge`.
-    fn activate_remote(self: &Arc<Self>, edge: Edge, screen: ScreenInfo, x_px: f64, y_px: f64) {
-        let along = edge::along_norm(edge, screen, x_px, y_px);
-        self.push_to_peer(Message::Input(InputEvent::Enter {
-            edge,
-            along_norm: along,
-        }));
-        self.set_remote_active(true, Some(edge));
-        self.start_flusher();
-        tracing::info!(edge = edge.as_str(), "remote control activated");
+    /// Hand the shared cursor to the peer through `edge` (the side losing it).
+    fn give_focus(self: &Arc<Self>, edge: Edge, along_norm: f32) {
+        if !self.focused.load(Ordering::Relaxed) {
+            return;
+        }
+        self.push_to_peer(Message::Input(InputEvent::Enter { edge, along_norm }));
+        self.set_focused(false);
+        self.notice("focus", "the cursor is now on the other computer");
+        tracing::info!(edge = edge.as_str(), "gave focus to the peer");
     }
 
-    /// Server-side hotkey: toggle driving the remote device.
-    fn toggle_remote(self: &Arc<Self>) {
-        let connected = self.status.lock().state == ConnState::Connected;
-        if !connected {
+    /// Take the shared cursor onto this screen (hotkey on the unfocused side).
+    fn take_focus(self: &Arc<Self>) {
+        if self.focused.load(Ordering::Relaxed) || !self.has_session() {
+            return;
+        }
+        // The side that currently shows the cursor must stop showing it.
+        self.push_to_peer(Message::Reclaim);
+        self.set_focused(true);
+        // Appear at the edge facing the peer: the host mirrors `Enter.edge`,
+        // so passing the opposite of our own edge lands on our own edge.
+        let edge = self.cfg.lock().edge.opposite();
+        self.host.on_input(&InputEvent::Enter {
+            edge,
+            along_norm: 0.5,
+        });
+        self.notice("focus", "the cursor is now on this computer");
+        tracing::info!("took the cursor back");
+    }
+
+    /// Hotkey on either side: move the cursor there, or bring it here.
+    fn toggle_focus(self: &Arc<Self>) {
+        if self.status.lock().state != ConnState::Connected {
             self.notice("info", "not connected — nothing to toggle");
             return;
         }
-        if self.status.lock().remote_active {
-            self.release_remote();
-        } else {
+        if self.focused.load(Ordering::Relaxed) {
             let edge = self.cfg.lock().edge;
-            let screen = *self.local_screen.lock();
-            // Hotkey activation enters at the middle of the configured edge.
-            let (x, y) = match edge {
-                Edge::Left => (0.5, screen.height / 2.0),
-                Edge::Right => (screen.width - 0.5, screen.height / 2.0),
-                Edge::Top => (screen.width / 2.0, 0.5),
-                Edge::Bottom => (screen.width / 2.0, screen.height - 0.5),
-            };
-            self.activate_remote(edge, screen, x, y);
+            self.give_focus(edge, 0.5);
+        } else {
+            self.take_focus();
         }
     }
 
-    /// Give control back to this (server) machine.
-    fn release_remote(self: &Arc<Self>) {
-        self.stop_flusher();
-        self.move_coalescer.lock().clear();
-        if self.status.lock().remote_active {
-            self.push_to_peer(Message::Input(InputEvent::ReleaseAll));
-            self.set_remote_active(false, None);
-            self.edge_tracker.lock().hint_returned();
-            tracing::info!("remote control released");
-        }
-    }
-
-    /// Client-side: ask the server to take control back.
-    fn request_control(&self) {
-        if !self.status.lock().remote_active {
+    /// The peer pushed its pointer onto this screen (it sent `Enter`).
+    pub fn on_focus_granted(self: &Arc<Self>, edge: Edge) {
+        if self.focused.load(Ordering::Relaxed) {
             return;
         }
-        self.push_to_peer(Message::Reclaim);
-        self.set_remote_active(false, None);
-        // Clear any key/button state the peer may have left held.
-        self.host.on_input(&InputEvent::ReleaseAll);
-        tracing::info!("requested control back from server");
+        self.set_focused(true);
+        tracing::info!(edge = edge.as_str(), "received the cursor from the peer");
     }
 
-    /// Server-side: the client pushed the return edge / hotkey.
-    pub fn on_peer_reclaimed(self: &Arc<Self>) {
-        self.release_remote();
-        self.notice("control", "control returned to this computer");
+    /// The peer asked for the cursor back (hotkey pressed on its side).
+    pub fn on_reclaim(self: &Arc<Self>) {
+        if !self.focused.load(Ordering::Relaxed) {
+            return;
+        }
+        self.set_focused(false);
+        tracing::info!("peer reclaimed the cursor");
     }
 
-    fn set_remote_active(&self, active: bool, edge: Option<Edge>) {
+    fn set_focused(self: &Arc<Self>, focused: bool) {
+        let was = self.focused.swap(focused, Ordering::Relaxed);
         {
             let mut status = self.status.lock();
-            status.remote_active = active;
-            if active {
-                if let Some(edge) = edge {
-                    match self.cfg.lock().mode {
-                        Mode::Client => status.remote_edge = Some(edge),
-                        Mode::Server => {}
-                    }
-                }
-            } else if self.cfg.lock().mode == Mode::Client {
-                status.remote_edge = None;
+            status.focused = focused;
+            status.forwarding = !focused && self.has_session();
+            // Compatibility alias for shells built before the focus model:
+            // "this machine's input is captured for the peer".
+            status.remote_active = status.forwarding;
+            status.remote_edge = None;
+        }
+        if was != focused {
+            // No key/button may stay held across a switch.
+            self.host.on_input(&InputEvent::ReleaseAll);
+            self.move_coalescer.lock().clear();
+            self.edge_tracker.lock().hint_returned();
+            if !focused && self.has_session() {
+                self.start_flusher();
+            } else {
+                self.stop_flusher();
             }
         }
         self.notify();
@@ -836,7 +846,7 @@ impl Engine {
                 tokio::select! {
                     _ = token.cancelled() => break,
                     _ = tick.tick() => {
-                        if !engine.status.lock().remote_active {
+                        if !engine.status.lock().forwarding {
                             continue;
                         }
                         let now = util::now_ms();
@@ -945,30 +955,43 @@ impl Engine {
         slot.tx.send(msg).is_ok()
     }
 
-    /// Called by the client session when remote input arrives.
+    /// Called by the session when peer input arrives (both roles).
     pub fn handle_incoming_input(self: &Arc<Self>, event: InputEvent) {
         self.counters.events_in.fetch_add(1, Ordering::Relaxed);
         match event {
             InputEvent::Enter { edge, .. } => {
                 tracing::info!(
                     edge = edge.as_str(),
-                    "remote control received — this computer is being driven"
+                    "received the shared cursor from the peer"
                 );
-                self.set_remote_active(true, Some(edge));
+                self.on_focus_granted(edge);
                 self.host.on_input(&event);
             }
             InputEvent::ReleaseAll => {
-                tracing::info!("the server released remote control");
-                self.host.on_input(&event);
+                if self.focused.load(Ordering::Relaxed) {
+                    self.host.on_input(&event);
+                }
             }
             _ => {
-                if self.status.lock().remote_active {
+                if self.focused.load(Ordering::Relaxed) {
                     self.host.on_input(&event);
                 } else {
-                    tracing::debug!("dropping stale input event");
+                    tracing::debug!("dropping input event while the cursor is elsewhere");
                 }
             }
         }
+    }
+
+    /// Called once a session is fully ready. The server's screen owns the
+    /// cursor at the start; the client begins by forwarding its input.
+    pub fn on_session_ready(self: &Arc<Self>, role: Mode) {
+        self.set_focused(role == Mode::Server);
+        if role == Mode::Server {
+            // Fresh session with the pointer at a normal position: the edge
+            // tracker may fire immediately (no warp happened).
+            *self.edge_tracker.lock() = EdgeTracker::new();
+        }
+        self.notify();
     }
 
     /// Server-side: verify a submitted pairing code.
@@ -1214,26 +1237,29 @@ impl Engine {
 
     /// Server role: session ended — return to listening.
     pub fn on_server_session_ended(self: &Arc<Self>) {
-        self.release_remote();
+        self.set_focused(false);
         {
             let mut status = self.status.lock();
             status.state = ConnState::Listening;
             status.peer = None;
+            status.forwarding = false;
+            status.focused = false;
+            status.remote_active = false;
         }
         self.ensure_pairing_code();
         self.refresh_pairing_status();
         self.notify();
     }
 
-    /// Client role: session ended — clear local remote state.
+    /// Client role: session ended — clear local focus state.
     pub fn on_client_session_ended(self: &Arc<Self>) {
-        if self.status.lock().remote_active {
-            self.set_remote_active(false, None);
-            self.host.on_input(&InputEvent::ReleaseAll);
-        }
+        self.set_focused(false);
         {
             let mut status = self.status.lock();
             status.peer = None;
+            status.forwarding = false;
+            status.focused = false;
+            status.remote_active = false;
         }
         self.notify();
     }

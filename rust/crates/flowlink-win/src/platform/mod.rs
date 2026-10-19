@@ -64,8 +64,8 @@ pub mod input {
     /// Windows type so the UI code is identical.
     #[derive(Clone, Copy, Debug, Default)]
     pub struct CaptureState {
-        pub mode_is_server: bool,
-        pub remote_active: bool,
+        pub capture_enabled: bool,
+        pub forwarding: bool,
         pub clipboard_enabled: bool,
         pub remote_edge: Option<Edge>,
         pub hotkey_mods: u8,
@@ -85,7 +85,7 @@ pub mod input {
         ScreenInfo::default()
     }
 
-    pub fn update_remote_active(_active: bool) {}
+    pub fn update_forwarding(_forwarding: bool) {}
 
     pub fn set_capture_enabled(_enabled: bool) {}
 

@@ -74,24 +74,39 @@ flow on the same connection.
 | `AuthResult` | server → client | `ok: bool`, `reason: Optional<String>` | Server also requires `device_id` to equal the `Hello` id |
 | `PairRequest` | client → server | `device_id`, `name`, `code` | Code is the 6-digit code displayed on the server |
 | `PairResult` | server → client | `ok`, `reason`, `token: Optional<String>`, `attempts_left: Optional<u8>` | Token present on success; `attempts_left` is informational |
-| `Input` | server → client | `InputEvent` | Only sent while remote control is active |
+| `Input` | both ways | `InputEvent` | Forwarded by the side that does **not** own the cursor; injected by the focused side |
 | `Clipboard` | both ways | `text: String` | UTF-8 text, ≤ `clipboard_max_bytes` |
 | `Heartbeat` | both ways | `seq: u64` | Sent every 1 s |
 | `Pong` | both ways | `seq: u64` | Echoes the heartbeat sequence; used for RTT |
-| `Reclaim` | client → server | – | User pushed the return edge or hit the hotkey on the client |
+| `Reclaim` | both ways | – | The unfocused side asks for the shared cursor (hotkey / UI) |
 | `Bye` | both ways | `reason: String` | Orderly end, e.g. `busy`, `shutting down`, `pairing timed out` |
 
 Messages that are invalid for a role or state are ignored (trace-logged)
 rather than fatal, except during the handshake where a protocol violation
 closes the connection.
 
-## Input events
+## Focus model (one shared cursor)
 
-`Input` wraps one of these variants:
+Exactly one side owns the shared cursor (`focused`). Server/client only
+decide who listens; input routing is symmetric:
+
+- The **focused** side uses its local input locally. When its pointer crosses
+  its configured edge, it hides its cursor, sends
+  `Input(Enter { edge, along_norm })` and starts forwarding every subsequent
+  event as `Input`. The peer becomes focused and injects those events.
+- The **unfocused** side hides its cursor, captures all of its input and
+  forwards it. Its keyboard therefore types into the focused screen.
+- Pressing the hotkey on the unfocused side sends `Reclaim`; the focused side
+  stops showing the cursor (the requester warps its own cursor to the edge
+  facing the peer). Pressing the hotkey on the focused side sends `Enter`
+  instead, handing the cursor over.
+- Every focus change emits a local `ReleaseAll` so no key/button stays held.
+- At session start the **server** side is focused; the client begins by
+  forwarding. Reconnects reset to that state.
 
 | Variant | Fields | Semantics |
 | --- | --- | --- |
-| `Enter` | `edge: Edge`, `along_norm: f32` | Remote cursor enters from `edge`; position along that edge, 0..1 |
+| `Enter` | `edge: Edge`, `along_norm: f32` | The *sender's* edge the cursor exited through; the receiver places the pointer on the mirrored side (see `edge::enter_position`) |
 | `Key` | `usage: u16`, `down: bool`, `modifiers: Modifiers` | Physical key event; `usage` is a USB HID keyboard usage id |
 | `MouseMove` | `dx: f32`, `dy: f32` | Relative movement in pixels |
 | `MouseButton` | `button: MouseButton`, `down`, `modifiers` | Button edges |

@@ -23,12 +23,12 @@ rough edge — not a bug to be filed anonymously.
 - **Not every key exists on the wire.** Fn, Touch ID, Eject and media
   brightness keys have no entry in the key table and are dropped, not
   translated.
-- **Single-master only.** While the client is being driven, its own physical
-  keyboard events are not forwarded back to the server; only the hotkey is
-  inspected. The server's keyboard is the only keyboard on the link.
-- **Control return warps the server cursor ~24 px inside** the configured
-  edge so the edge tracker re-arms; the cursor does not sit exactly on the
-  border after control comes back.
+- **Two masters, one cursor.** Either computer can drive the link: the
+  shared cursor lives on one screen at a time and both physical keyboards /
+  mice are routed to it. While the cursor is on the other computer this
+  Mac's input is captured (and its cursor hidden); when the cursor comes
+  back, everything is local again. Both machines need an edge configured
+  towards each other (e.g. Mac left, Windows right).
 
 ## Windows
 

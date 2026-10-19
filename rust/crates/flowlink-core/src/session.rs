@@ -361,6 +361,7 @@ async fn run_server_session(
     engine.set_state(ConnState::Connected);
     engine.refresh_pairing_status();
     engine.notice("connected", &format!("{} is connected", hello.name));
+    engine.on_session_ready(Mode::Server);
 
     let result = pump(engine.clone(), &mut stream, rx, cancel, Mode::Server).await;
     drop(guard);
@@ -545,6 +546,7 @@ async fn run_client_session(
     engine.set_state(ConnState::Connected);
     engine.refresh_pairing_status();
     engine.notice("connected", &format!("connected to {}", ack.name));
+    engine.on_session_ready(Mode::Client);
 
     let result = pump(engine.clone(), &mut stream, rx, cancel, Mode::Client).await;
     drop(guard);
@@ -724,20 +726,21 @@ async fn pump(
 }
 
 async fn on_session_message(engine: &Arc<Engine>, role: Mode, msg: Message) -> Result<()> {
-    match (role, msg) {
-        // Client receives injected input.
-        (Mode::Client, Message::Input(event)) => {
+    match msg {
+        // Input flows both ways now: whichever side does not own the cursor
+        // forwards it, and the focused side injects it.
+        Message::Input(event) => {
             engine.handle_incoming_input(event);
         }
-        // Server receives reclaim requests.
-        (Mode::Server, Message::Reclaim) => {
-            engine.on_peer_reclaimed();
+        // The peer asked for the cursor (hotkey on its side).
+        Message::Reclaim => {
+            engine.on_reclaim();
         }
         // Clipboard flows both ways.
-        (_, Message::Clipboard { text }) => {
+        Message::Clipboard { text } => {
             engine.handle_incoming_clipboard(&text);
         }
-        (_, other) => {
+        other => {
             tracing::trace!("ignoring {} in role {}", other.name(), role.as_str());
         }
     }

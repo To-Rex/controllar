@@ -69,19 +69,17 @@ public struct MenuBarContent: View {
 
             Divider()
 
-            if model.mode == .server {
+            if model.isConnected {
                 quickRow(
-                    title: model.status?.remoteActive == true
-                        ? "Return control to this Mac"
-                        : "Take control of \(model.status?.peer?.name ?? "the other computer")",
-                    symbol: model.status?.remoteActive == true ? "arrow.uturn.backward" : "cursorarrow.rays",
-                    enabled: model.isConnected
+                    title: model.status?.ownsCursor == true
+                        ? "Send cursor to the other computer"
+                        : "Bring the cursor to this Mac",
+                    symbol: model.status?.ownsCursor == true
+                        ? "arrow.right.to.line"
+                        : "arrow.uturn.backward",
+                    enabled: true
                 ) {
                     model.bridge.toggleControl()
-                }
-            } else if model.isConnected, model.status?.remoteActive == true {
-                quickRow(title: "Take control back", symbol: "arrow.uturn.backward", enabled: true) {
-                    model.bridge.requestControl()
                 }
             }
 

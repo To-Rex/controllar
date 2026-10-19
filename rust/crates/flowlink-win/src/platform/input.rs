@@ -424,6 +424,14 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         WM_MOUSEMOVE => {
             let (dx, dy) = mouse_delta(info.pt.x, info.pt.y);
             if server {
+                // While driving the peer the physical pointer is clamped at
+                // the desktop edges. Position-based deltas then read as zero
+                // and the remote cursor freezes (keyboard keeps working, so
+                // it looks like "the cursor doesn't move"). Keep the hidden
+                // pointer inside a runway so deltas always flow.
+                if snapshot.remote_active {
+                    recenter_if_outside_runway();
+                }
                 let (origin_x, origin_y) = virtual_origin();
                 engine.execute(Cmd::HostInput(HostInput::MouseMove {
                     x_px: (info.pt.x - origin_x) as f64,
@@ -500,6 +508,49 @@ fn mouse_delta(x: i32, y: i32) -> (f64, f64) {
     let last_x = LAST_MOUSE_X.swap(x, Ordering::Relaxed);
     let last_y = LAST_MOUSE_Y.swap(y, Ordering::Relaxed);
     ((x - last_x) as f64, (y - last_y) as f64)
+}
+
+/// How far from the virtual-screen edge the tucked-away pointer is kept while
+/// the server drives the peer.
+const RUNWAY_MARGIN: i32 = 160;
+
+/// Re-center the (hidden) physical pointer when it approaches a desktop edge.
+///
+/// Windows clamps the cursor at screen boundaries, so `WM_MOUSEMOVE` stops
+/// reporting position changes once the pointer is pinned to an edge — relative
+/// deltas become zero and the remote cursor freezes. Warping the pointer back
+/// to the middle keeps deltas flowing; the user never sees it because the
+/// local cursor is hidden for the duration of remote control.
+fn recenter_if_outside_runway() {
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    if width <= RUNWAY_MARGIN * 2 || height <= RUNWAY_MARGIN * 2 {
+        return;
+    }
+    let (origin_x, origin_y) = virtual_origin();
+    let mut point = POINT::default();
+    // SAFETY: `point` is a valid writable POINT.
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return;
+    }
+    let inside = point.x >= origin_x + RUNWAY_MARGIN
+        && point.x < origin_x + width - RUNWAY_MARGIN
+        && point.y >= origin_y + RUNWAY_MARGIN
+        && point.y < origin_y + height - RUNWAY_MARGIN;
+    if inside {
+        return;
+    }
+    let center = POINT {
+        x: origin_x + width / 2,
+        y: origin_y + height / 2,
+    };
+    // SAFETY: SetCursorPos has no preconditions beyond a valid point.
+    if unsafe { SetCursorPos(center.x, center.y) }.is_ok() {
+        // The warp is not user motion: reset the delta baseline so the next
+        // event does not look like a jump across half the screen.
+        LAST_MOUSE_X.store(center.x, Ordering::Relaxed);
+        LAST_MOUSE_Y.store(center.y, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------

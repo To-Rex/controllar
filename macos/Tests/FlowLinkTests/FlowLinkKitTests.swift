@@ -113,3 +113,75 @@ final class CoreLinkTests: XCTestCase {
         XCTAssertTrue(String(cString: version!).contains("."))
     }
 }
+
+final class InjectorEdgeTests: XCTestCase {
+    private let metrics = ScreenMetrics(width: 1920, height: 1080, origin: .zero, scale: 1)
+
+    func testReturnNeedsOutwardPush() {
+        // Parked on the left edge: sideways or zero motion must not return.
+        XCTAssertFalse(Injector.isReturnPush(
+            edge: .left,
+            target: CGPoint(x: 0, y: 500),
+            delta: CGPoint(x: 0, y: 3),
+            metrics: metrics
+        ))
+        XCTAssertFalse(Injector.isReturnPush(
+            edge: .left,
+            target: CGPoint(x: 0, y: 500),
+            delta: CGPoint(x: 4, y: 0),
+            metrics: metrics
+        ))
+        // Pushing outwards on the edge → return.
+        XCTAssertTrue(Injector.isReturnPush(
+            edge: .left,
+            target: CGPoint(x: 0, y: 500),
+            delta: CGPoint(x: -3, y: 0),
+            metrics: metrics
+        ))
+        // Not on the edge → never returns, even while pushing.
+        XCTAssertFalse(Injector.isReturnPush(
+            edge: .left,
+            target: CGPoint(x: 2, y: 500),
+            delta: CGPoint(x: -3, y: 0),
+            metrics: metrics
+        ))
+    }
+
+    func testMirroredEdges() {
+        XCTAssertTrue(Injector.isReturnPush(
+            edge: .right,
+            target: CGPoint(x: 1920, y: 500),
+            delta: CGPoint(x: 3, y: 0),
+            metrics: metrics
+        ))
+        XCTAssertFalse(Injector.isReturnPush(
+            edge: .right,
+            target: CGPoint(x: 1920, y: 500),
+            delta: CGPoint(x: -3, y: 0),
+            metrics: metrics
+        ))
+        XCTAssertTrue(Injector.isReturnPush(
+            edge: .top,
+            target: CGPoint(x: 500, y: 0),
+            delta: CGPoint(x: 0, y: -3),
+            metrics: metrics
+        ))
+        XCTAssertTrue(Injector.isReturnPush(
+            edge: .bottom,
+            target: CGPoint(x: 500, y: 1080),
+            delta: CGPoint(x: 0, y: 3),
+            metrics: metrics
+        ))
+    }
+
+    func testEntryInsetLeavesRoomForSidewaysMotion() {
+        // A 6 px inset means ordinary motion does not immediately qualify as
+        // a push back through the edge.
+        XCTAssertFalse(Injector.isReturnPush(
+            edge: .left,
+            target: CGPoint(x: 6, y: 500),
+            delta: CGPoint(x: -2, y: 4),
+            metrics: metrics
+        ))
+    }
+}

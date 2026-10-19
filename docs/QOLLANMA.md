@@ -69,6 +69,9 @@ FlowLink.exe’ni ishga tushiring — u tray (system tray)da turadi.
 
 **Server kompyuterda:**
 - Dashboard’da katta 6 xonali kod va “Show QR code” tugmasi bor.
+- **Windows’da birinchi marta:** “NETWORK” kartasidagi **Allow through
+  firewall…** tugmasini bosing (bir marta admin ruxsati so‘raladi). Bu
+  bo‘lmasa narigi kompyuter Windows’ga ulan olmaydi.
 
 **Client kompyuterda** (Client rejimida):
 - *Found on this network* ro‘yxatidan serverni tanlab **Connect** bosing, yoki
@@ -101,12 +104,21 @@ client avtomatik ulanadi (token orqali, kodsiz).
 
 | Muammo | Yechim |
 |---|---|
+| **Windows: QR/kod ko‘rinmayapti, „No pairing code yet“** | Odatda ikki sabab: (1) ilova ikki nusxada ochilgan — tray’dagi barcha FlowLink nusxalarini **Quit** qilib, faqat bittasini ishga tushiring (yangi versiya buni avtomatik bloklaydi va ogohlantiradi); (2) server rejimda emas — Sozlamalarda **Server** rejimini tanlab **Start** bosing. |
+| **Windows serverga ulanib bo‘lmayapti (eng ko‘p uchraydigan sabab!)** | Windows server sahifasida **NETWORK** kartasini toping → **Allow through firewall…** tugmasini bosing (bir marta administrator ruxsati so‘raladi) → qoidalar qo‘shiladi. Shu tugma TCP 24800 va UDP 5353 qoidalarini yaratadi. Qo‘lda ham mumkin (admin CMD): `netsh advfirewall firewall add rule name="FlowLink" dir=in action=allow protocol=TCP localport=24800` |
+| **„Found on this network“ ro‘yxatida server ko‘rinmayapti** | Windows Firewall discovery (UDP 5353) ni bloklayapti yoki routerda „client isolation“ yoqilgan. Yechim: serverdagi **NETWORK** kartasidagi manzilni (masalan `192.168.1.50:24800`) clientda **Connect manually**ga kiriting — bu har doim ishlaydi. |
+| **Umuman ulanmayapti (Wi-Fi ↔ Ethernet)** | Ikkala kompyuter **bitta router/tarmoqda** bo‘lishi kerak. Birinchi tekshiruv: Windows’da `ipconfig` → `192.168.x.x`, Mac’da `ifconfig` → bir xil `192.168.x.*` bo‘lishi kerak. Windows’da firewall ruxsatini bajaring (yuqoriga qarang). |
 | Client serverni ko‘rmayapti | Ikkala kompyuter bir tarmoqda ekaniga ishonch hosil qiling; server rejimida “Listening” holatida turishi kerak. Manuel IP bilan urinib ko‘ring. |
-| Ruxsat so‘ralmagan / ishlamayapti | System Settings → Privacy & Security’da FlowLink’ga Accessibility va Input Monitoring bering, dasturni qayta ishga tushiring. |
+| Ruxsat so‘ralmagan / ishlmayapti | System Settings → Privacy & Security’da FlowLink’ga Accessibility va Input Monitoring bering, dasturni qayta ishga tushiring. |
 | Klaviatura ishlamayapti (macOS) | Parol maydonlari va Terminal’dagi *Secure Keyboard Entry* rejimida tizim sintetik klaviaturani bloklaydi — bu macOS cheklovi. |
 | Windows’da ba’zi dasturlar javob bermayapti | Administrator sifatida ochilgan oynalar (UAC doirasi) FlowLink’ni ham administrator qilib ishga tushirishni talab qiladi. |
 | Kod eskirgan | Serverda “New code” tugmasini bosing (yoki 3 xato urinishdan keyin avtomatik yangilanadi). |
 | Log kerak bo‘lsa | Sozlamalar → Open logs folder yoki dastur ichidagi **Logs** sahifasi. |
+
+> **Muhim:** eski versiyada bu muammolar (QR chiqmasligi, firewall) tuzatilmagan.
+> Ikkala kompyuterda ham **yangilangan build** ishlayotganiga ishonch hosil
+> qiling (Mac: `./scripts/build-macos.sh` → `dist/FlowLink.app`;
+> Windows: `cargo build --release -p flowlink-win`).
 
 ## 7. Xavfsizlik qisqacha
 

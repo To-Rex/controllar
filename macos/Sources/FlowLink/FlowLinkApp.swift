@@ -30,6 +30,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoClosedWindow = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Two copies (e.g. an old build on the Desktop plus a fresh one) would
+        // fight over the listen port, leaving one of them without a pairing
+        // code. Refuse to start a second instance.
+        let bundleID = Bundle.main.bundleIdentifier ?? "app.flowlink.macos"
+        let others = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if !others.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "FlowLink is already running"
+            alert.informativeText = "Look for the ⇄ icon in the menu bar — two copies would fight over the listening port. Quit the other copy first."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Quit")
+            _ = alert.runModal()
+            NSApp.terminate(nil)
+            return
+        }
+
         NSApp.setActivationPolicy(.accessory)
         AppModel.shared.bootstrap()
 

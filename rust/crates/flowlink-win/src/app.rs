@@ -28,12 +28,16 @@ use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use tracing::{info, warn};
 
-use crate::platform::{autostart, clipboard, input};
+use crate::platform::{autostart, clipboard, firewall, input};
 use crate::theme::{self, Theme};
 use crate::tray::{self, TrayCommand};
 
 /// Name of the marker file that records "onboarding finished".
 const ONBOARDED_MARKER: &str = ".onboarded";
+
+/// Listen port used by preview/screenshot runs (kept away from the real 24800
+/// so a running FlowLink instance never collides with a preview).
+const PREVIEW_PORT: u16 = 24810;
 
 /// How often the pairing QR code is regenerated while the server page is open.
 const QR_REFRESH: Duration = Duration::from_secs(2);
@@ -398,6 +402,14 @@ impl HotkeyDraft {
     }
 }
 
+/// Shared state of a running firewall elevation job (UI ↔ worker thread).
+#[derive(Default)]
+struct FirewallJob {
+    busy: bool,
+    /// `Some((ok, message))` once finished.
+    result: Option<(bool, String)>,
+}
+
 /// The eframe application.
 struct WinApp {
     shared: Arc<AppShared>,
@@ -438,11 +450,16 @@ struct WinApp {
     /// Last values pushed into the tray menu (avoid per-frame churn).
     last_tray_state: Option<(bool, bool)>,
 
+    /// Cached Windows Firewall state (checked lazily on the server page).
+    firewall_state: Option<firewall::RuleState>,
+    /// Progress of a running "allow through firewall" elevation job.
+    firewall_job: Arc<Mutex<FirewallJob>>,
+
     // --- preview / screenshot mode (cross-platform design QA) -------------
     /// When set, the app keeps repainting, captures one frame and quits.
     screenshot: Option<PathBuf>,
     screenshot_requested: bool,
-    screenshot_frames: u32,
+    screenshot_started_at: Option<Instant>,
 }
 
 impl WinApp {
@@ -521,9 +538,11 @@ impl WinApp {
             autostart_state: autostart::is_enabled(),
             flash: None,
             last_tray_state: None,
+            firewall_state: None,
+            firewall_job: Arc::new(Mutex::new(FirewallJob::default())),
             screenshot,
             screenshot_requested: false,
-            screenshot_frames: 0,
+            screenshot_started_at: None,
         })
     }
 
@@ -928,6 +947,53 @@ impl WinApp {
     // ---------------------------------------------------------------------
 
     fn server_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        // --- engine state banners -----------------------------------------
+        if let Some(error) = &status.error {
+            egui::Frame::default()
+                .fill(theme.err.gamma_multiply(0.12))
+                .stroke(egui::Stroke::new(1.0_f32, theme.err.gamma_multiply(0.5)))
+                .corner_radius(egui::CornerRadius::same(theme::CARD_RADIUS))
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("FlowLink could not start listening")
+                            .strong()
+                            .color(theme.err),
+                    );
+                    ui.label(
+                        egui::RichText::new(error)
+                            .size(11.0)
+                            .color(theme.text_dim),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "If the port is already in use, quit any other FlowLink copy (tray → Quit) and press Start.",
+                        )
+                        .size(10.5)
+                        .color(theme.text_dim),
+                    );
+                    if ui.button("Start again").clicked() {
+                        self.engine.execute(Cmd::Start);
+                    }
+                });
+            ui.add_space(10.0);
+        } else if !status.is_running() {
+            card(ui, theme, |ui| {
+                card_title(ui, theme, "Engine stopped");
+                ui.label(
+                    egui::RichText::new(
+                        "FlowLink is not running, so no pairing code is shown yet.",
+                    )
+                    .size(11.0)
+                    .color(theme.text_dim),
+                );
+                if ui.button("Start").clicked() {
+                    self.start_engine();
+                }
+            });
+            ui.add_space(10.0);
+        }
+
         // --- pairing ------------------------------------------------------
         card(ui, theme, |ui| {
             card_title(ui, theme, "Pairing");
@@ -1004,6 +1070,8 @@ impl WinApp {
         });
 
         ui.add_space(10.0);
+
+        self.network_card(ui, theme, status);
 
         // --- edge ---------------------------------------------------------
         card(ui, theme, |ui| {
@@ -1093,6 +1161,196 @@ impl WinApp {
     // Client dashboard
     // ---------------------------------------------------------------------
 
+    /// The "Network" card on the server page: manual address + Windows
+    /// Firewall status and remediation. Inbound connections are the usual
+    /// failure point on Windows, so this is deliberately prominent.
+    fn network_card(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
+        card(ui, theme, |ui| {
+            card_title(ui, theme, "Network");
+            let addr = status
+                .local
+                .addrs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "—".to_string());
+            let port = status.local.port;
+            let address = format!("{addr}:{port}");
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Manual connect address")
+                        .size(11.0)
+                        .color(theme.text_dim),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&address)
+                            .monospace()
+                            .size(12.5)
+                            .color(theme.text),
+                    )
+                    .truncate(),
+                );
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(address.clone());
+                    self.flash("Address copied");
+                }
+            });
+            ui.add_space(6.0);
+
+            // Lazy check: `netsh` costs ~100 ms, so only once (and after the
+            // user asks for a re-check).
+            if self.firewall_state.is_none() {
+                self.firewall_state = Some(firewall::check(port as u16));
+            }
+
+            // Poll a running elevation job.
+            let finished = {
+                let mut job = self.firewall_job.lock();
+                match job.result.take() {
+                    Some(result) => {
+                        job.busy = false;
+                        Some(result)
+                    }
+                    None => None,
+                }
+            };
+            if let Some((ok, message)) = finished {
+                if ok {
+                    self.firewall_state = Some(firewall::RuleState::Present);
+                }
+                self.flash(message);
+            }
+            let busy = self.firewall_job.lock().busy;
+
+            match self.firewall_state {
+                Some(firewall::RuleState::Present) => {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("✓").color(theme.ok).strong());
+                        ui.label(
+                            egui::RichText::new("Windows Firewall allows FlowLink")
+                                .size(11.0)
+                                .color(theme.text_dim),
+                        );
+                        if ui.small_button("Re-check").clicked() {
+                            self.firewall_state = None;
+                        }
+                    });
+                }
+                Some(firewall::RuleState::Missing) => {
+                    ui.label(
+                        egui::RichText::new(
+                            "Windows Firewall is probably blocking connections from the other computer.",
+                        )
+                        .size(11.0)
+                        .color(theme.warn),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let allow = egui::Button::new(
+                            egui::RichText::new("Allow through firewall…")
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(theme.accent)
+                        .corner_radius(egui::CornerRadius::same(8));
+                        if ui.add_enabled(!busy, allow).clicked() {
+                            self.start_firewall_job(port as u16, ui.ctx().clone());
+                        }
+                        if busy {
+                            ui.spinner();
+                            ui.label(
+                                egui::RichText::new("waiting for the admin prompt…")
+                                    .size(10.5)
+                                    .color(theme.text_dim),
+                            );
+                        }
+                        if ui.button("Firewall settings").clicked() {
+                            firewall::open_settings();
+                        }
+                    });
+                    if let Ok(exe) = std::env::current_exe() {
+                        let commands = firewall::commands(port as u16, &exe);
+                        if let Some(first) = commands.first() {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(first)
+                                            .monospace()
+                                            .size(9.5)
+                                            .color(theme.text_dim),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(commands.join("\n"));
+                                if ui.small_button("Copy commands").clicked() {
+                                    ui.ctx().copy_text(commands.join("\n"));
+                                    self.flash("Commands copied — run them in an admin terminal");
+                                }
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "If the other computer cannot connect, allow inbound TCP {port} and UDP 5353 in Windows Firewall.",
+                        ))
+                        .size(11.0)
+                        .color(theme.text_dim),
+                    );
+                    if ui.button("Open firewall settings").clicked() {
+                        firewall::open_settings();
+                    }
+                }
+            }
+        });
+        ui.add_space(10.0);
+    }
+
+    /// Run the elevation prompt off the UI thread; the result is picked up by
+    /// [`Self::network_card`] on the next frame.
+    fn start_firewall_job(&self, port: u16, ctx: egui::Context) {
+        {
+            let mut job = self.firewall_job.lock();
+            if job.busy {
+                return;
+            }
+            job.busy = true;
+            job.result = None;
+        }
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(err) => {
+                let mut job = self.firewall_job.lock();
+                job.busy = false;
+                job.result = Some((false, format!("Cannot locate the executable: {err}")));
+                return;
+            }
+        };
+        let job = Arc::clone(&self.firewall_job);
+        let spawned = std::thread::Builder::new()
+            .name("flowlink-firewall".to_string())
+            .spawn(move || {
+                let outcome = firewall::allow_elevated(port, &exe);
+                let mut guard = job.lock();
+                guard.result = Some(match outcome {
+                    Ok(()) => (
+                        true,
+                        "Firewall rules added — the other computer can connect now".to_string(),
+                    ),
+                    Err(err) => (false, format!("Firewall change failed: {err}")),
+                });
+                guard.busy = false;
+                ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            let mut job = self.firewall_job.lock();
+            job.busy = false;
+            job.result = Some((false, "Could not start the firewall worker".to_string()));
+        }
+    }
+
+    /// Client dashboard: connection state, discovered servers, manual entry.
     fn client_page(&mut self, ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
         // --- connection state --------------------------------------------
         card(ui, theme, |ui| {
@@ -1123,6 +1381,19 @@ impl WinApp {
                     egui::RichText::new(format!("Retrying in {}s", ms / 1000 + 1))
                         .size(11.0)
                         .color(theme.text_dim),
+                );
+            }
+            if matches!(
+                status.state,
+                ConnStateMirror::Reconnecting | ConnStateMirror::Error
+            ) {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "No connection yet. Both computers must be on the same network, and the server must allow inbound TCP 24800 — on Windows use “Allow through firewall…” on the server page (one admin prompt).",
+                    )
+                    .size(10.5)
+                    .color(theme.text_dim),
                 );
             }
             if status.remote_active {
@@ -1200,6 +1471,13 @@ impl WinApp {
                     egui::RichText::new("Searching… make sure the server is running.")
                         .size(11.0)
                         .color(theme.text_dim),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Discovery can be blocked by Windows Firewall or by “client isolation” on the router — the address field below always works.",
+                    )
+                    .size(10.5)
+                    .color(theme.text_dim),
                 );
             }
             for device in servers {
@@ -1393,6 +1671,8 @@ impl WinApp {
                             match self.port_edit.trim().parse::<u16>() {
                                 Ok(port) if port > 0 => {
                                     self.engine.execute(Cmd::SetListenPort(port));
+                                    // The firewall rule is per port: re-check.
+                                    self.firewall_state = None;
                                     self.flash("Port saved");
                                 }
                                 _ => self.flash("Enter a port between 1 and 65535"),
@@ -1673,22 +1953,24 @@ impl WinApp {
     /// Preview/screenshot mode: let the engine settle, capture one frame,
     /// write it as PNG and quit. A no-op unless `--screenshot` was passed.
     fn screenshot_tick(&mut self, ctx: &egui::Context) {
-        /// ~1.5 s at 60 fps so the first engine status has arrived.
-        const SETTLE_FRAMES: u32 = 90;
-        /// Give up if the backend never delivers the image.
-        const GIVE_UP_FRAMES: u32 = 240;
+        // Wall-clock settle time so the first engine status has arrived —
+        // frame counts are useless because egui repaints as fast as it can.
+        const SETTLE: Duration = Duration::from_millis(1200);
+        // Give up if the backend never delivers the image.
+        const GIVE_UP: Duration = Duration::from_secs(4);
 
         let Some(path) = self.screenshot.clone() else {
             return;
         };
 
+        let started = *self.screenshot_started_at.get_or_insert_with(Instant::now);
+        let elapsed = started.elapsed();
+
         if !self.screenshot_requested {
-            self.screenshot_frames += 1;
             ctx.request_repaint_after(Duration::from_millis(16));
-            if self.screenshot_frames >= SETTLE_FRAMES {
+            if elapsed >= SETTLE {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
                 self.screenshot_requested = true;
-                self.screenshot_frames = 0;
                 ctx.request_repaint();
             }
             return;
@@ -1708,9 +1990,8 @@ impl WinApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        self.screenshot_frames += 1;
         ctx.request_repaint_after(Duration::from_millis(16));
-        if self.screenshot_frames > GIVE_UP_FRAMES {
+        if elapsed >= SETTLE + GIVE_UP {
             tracing::error!("preview screenshot was never delivered by the backend");
             self.quitting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1781,6 +2062,12 @@ pub fn run() -> Result<()> {
     }
     let start_hidden = std::env::args().any(|arg| arg == "--autostart") && preview_page.is_none();
 
+    // Two instances would fight over the listen port (the second one ends up
+    // with no pairing code) — refuse politely and point at the tray.
+    if !crate::platform::single_instance::acquire() {
+        return Ok(());
+    }
+
     // Physical-pixel geometry must be settled before the hooks or the screen
     // metrics are used.
     input::init_process_dpi_awareness();
@@ -1809,12 +2096,14 @@ pub fn run() -> Result<()> {
         info!("waiting for onboarding to complete");
     }
     // Dashboard previews need realistic engine state (listening + code for
-    // the server page, an idle client for the client page).
+    // the server page, an idle client for the client page). Preview runs use
+    // their own port so they never fight with a real FlowLink instance.
     if let Some(page) = preview_page {
         let mode = match page {
             Page::Client => Mode::Client,
             _ => Mode::Server,
         };
+        engine.execute(Cmd::SetListenPort(PREVIEW_PORT));
         engine.execute(Cmd::SetMode(mode));
         if mode == Mode::Server {
             engine.execute(Cmd::Start);
@@ -2024,7 +2313,8 @@ fn metrics_card(ui: &mut egui::Ui, theme: &Theme, status: &StatusMirror) {
 /// modes — a light-mode "dark" colour would be invisible on white.
 fn draw_qr(ui: &mut egui::Ui, matrix: &flowlink_core::qr::QrMatrix) {
     const MODULE_DARK: egui::Color32 = egui::Color32::from_rgb(0x12, 0x14, 0x1B);
-    let side = ui.available_width().min(200.0);
+    // Compact enough that the firewall/network card stays above the fold.
+    let side = ui.available_width().min(172.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 8.0_f32, egui::Color32::WHITE);

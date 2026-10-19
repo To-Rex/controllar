@@ -15,7 +15,11 @@ pub mod autostart;
 #[cfg(windows)]
 pub mod clipboard;
 #[cfg(windows)]
+pub mod firewall;
+#[cfg(windows)]
 pub mod input;
+#[cfg(windows)]
+pub mod single_instance;
 
 // ---------------------------------------------------------------------------
 // Preview (non-Windows) implementations
@@ -105,7 +109,6 @@ pub mod clipboard {
     use parking_lot::RwLock;
 
     use super::input::CaptureState;
-
     /// Echo-suppression fingerprint — mirrors the Windows type.
     #[derive(Default)]
     pub struct Fingerprint {
@@ -132,4 +135,46 @@ pub mod clipboard {
     }
 
     pub fn stop() {}
+}
+
+#[cfg(not(windows))]
+pub mod firewall {
+    //! Firewall management is Windows-only; preview builds report "unknown".
+    #![allow(dead_code)]
+
+    use std::path::Path;
+
+    use anyhow::Result;
+
+    pub const RULE_NAME: &str = "FlowLink";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum RuleState {
+        Present,
+        Missing,
+        Unknown,
+    }
+
+    pub fn check(_port: u16) -> RuleState {
+        RuleState::Unknown
+    }
+
+    pub fn commands(_port: u16, _exe: &Path) -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn allow_elevated(_port: u16, _exe: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn open_settings() {}
+}
+
+#[cfg(not(windows))]
+pub mod single_instance {
+    //! Single-instance guard is Windows-only; preview builds always proceed.
+
+    pub fn acquire() -> bool {
+        true
+    }
 }

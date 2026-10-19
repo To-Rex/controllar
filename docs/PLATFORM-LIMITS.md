@@ -32,6 +32,21 @@ rough edge — not a bug to be filed anonymously.
 
 ## Windows
 
+- **Windows Firewall blocks inbound connections by default.** This is the
+  single most common reason a macOS client cannot reach a Windows server: the
+  TCP listen port (24800 by default) and mDNS discovery replies (UDP 5353)
+  are dropped until a rule exists. FlowLink handles this: the server page's
+  **Network** card shows the firewall state and offers **Allow through
+  firewall…**, which adds the rules through one UAC prompt (`netsh
+  advfirewall firewall add rule …`); the exact commands are also shown and
+  copyable for manual use. Without the rules, discovery fails *and* manual
+  connections time out. On networks with router-side “client isolation”
+  (some guest Wi-Fi setups), even a correct firewall cannot help — put both
+  computers on the same normal LAN, or use cables.
+- **Single instance.** A named mutex makes FlowLink refuse to start twice;
+  the tray is where an existing copy lives. Two instances would fight over
+  the listen port (the second one ends up with no pairing code), so a second
+  launch now shows a message instead.
 - **Injected input obeys UIPI.** Events posted with `SendInput` cannot reach
   windows of a higher integrity level. Typing into an elevated app (an
   Administrator terminal, an installer's elevation prompt) while FlowLink
@@ -45,6 +60,9 @@ rough edge — not a bug to be filed anonymously.
 - **UI surface is the tray menu and the settings window** (`tray-icon` +
   `egui`, see `rust/Cargo.toml`). FlowLink installs no DWM hooks and draws no
   overlays on the desktop; the settings window is a plain eframe window.
+  The egui UI shares the macOS design tokens (`theme.rs`) and can be
+  inspected offscreen from any platform — see docs/BUILD.md, "UI preview
+  mode".
 - The Windows shell lives in `rust/crates/flowlink-win` and is the newest
   part of the tree; behavior described here reflects the intended design.
 

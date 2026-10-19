@@ -121,6 +121,20 @@ public struct DashboardView: View {
                         .foregroundStyle(DS.textDim)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: 320, alignment: .leading)
+                    if let local = model.status?.local, let addr = local.addrs.first {
+                        HStack(spacing: 6) {
+                            Text("Manual: \(addr):\(local.port)")
+                                .font(DS.monoSmall)
+                                .foregroundStyle(DS.textDim)
+                                .textSelection(.enabled)
+                            Button("Copy") {
+                                let pasteboard = NSPasteboard.general
+                                pasteboard.clearContents()
+                                pasteboard.setString("\(addr):\(local.port)", forType: .string)
+                            }
+                            .buttonStyle(QuietButtonStyle())
+                        }
+                    }
                 }
                 Spacer()
                 VStack(spacing: 8) {
@@ -480,12 +494,16 @@ public struct DashboardView: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(DS.err)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Something went wrong")
                     .font(.system(.callout, weight: .semibold))
                 Text(error)
                     .font(.system(.caption))
                     .foregroundStyle(DS.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Both computers must be on the same network. If the server is a Windows PC, allow FlowLink through its firewall (server page → “Allow through firewall…”).")
+                    .font(.system(.caption2))
+                    .foregroundStyle(DS.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()

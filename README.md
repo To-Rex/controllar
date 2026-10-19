@@ -40,7 +40,7 @@ mode"); macOS previews come from the app's built-in snapshot mode
 | ![macOS onboarding](docs/screenshots/macos-onboarding.png) | ![Windows onboarding](docs/screenshots/windows-onboarding.png) |
 | ![macOS server dashboard](docs/screenshots/macos-server.png) | ![Windows server dashboard](docs/screenshots/windows-server.png) |
 | ![macOS settings](docs/screenshots/macos-settings.png) | ![Windows settings](docs/screenshots/windows-settings.png) |
-| ![macOS menu bar](docs/screenshots/macos-menubar.png) | ![Windows client page, light theme](docs/screenshots/windows-server-light.png) |
+| ![macOS menu bar](docs/screenshots/macos-menubar.png) | ![Windows server page, light theme](docs/screenshots/windows-server-light.png) |
 
 ## Repository layout
 

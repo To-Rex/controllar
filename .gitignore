@@ -6,6 +6,7 @@ macos/.build/
 macos/.swiftpm/
 macos/Vendor/libflowlink_ffi.a
 *.xcuserstate
+.build/
 
 # Build output
 dist/

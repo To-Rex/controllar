@@ -220,6 +220,7 @@ public final class AppModel: ObservableObject {
             snapshot.hotkeyUsage = decoded.hotkey.usage
         }
         injector.setPeerEdge(decoded.peerEdge)
+        injector.setForwarding(decoded.isConnected && decoded.isForwarding)
         if decoded.isConnected && decoded.isForwarding {
             injector.hideCursor()
         } else {
@@ -346,8 +347,9 @@ public final class AppModel: ObservableObject {
         let peer = status.peer?.name ?? "the other computer"
         switch status.state {
         case "connected":
+            let edge = (status.peerEdge ?? status.edge).title.lowercased()
             return status.ownsCursor
-                ? "Cursor on this Mac — press the hotkey or cross the edge to switch"
+                ? "Cursor on this Mac — press the hotkey or push it through the \(edge) edge"
                 : "Cursor on \(peer) — your input is forwarded there"
         case "listening":
             return status.peer == nil ? "Listening for clients" : "Pairing in progress"

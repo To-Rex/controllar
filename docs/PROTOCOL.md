@@ -121,7 +121,7 @@ decide who listens; input routing is symmetric:
   instead, handing the cursor over.
 - **Injected-edge return:** when the physical mouse is on the other computer,
   the focused side receives synthetic moves. Its injector watches them: after
-  `Enter` the pointer must travel 40 px inside, then 28 px of outward
+  `Enter` the pointer must travel 32 px inside, then 20 px of outward
   overshoot at the peer-facing edge causes the shell to issue a local
   `HandOff` command; the core (only if still focused and on that edge) sends
   `Enter` back. One physical mouse can therefore cross the shared seam in

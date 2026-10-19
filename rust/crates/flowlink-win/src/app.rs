@@ -1427,7 +1427,8 @@ impl WinApp {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "The cursor is on the other computer — your keyboard and mouse drive it there. Push the cursor back across the edge facing this screen or press {} to bring it here.",
+                        "The cursor is on the other computer — your keyboard and mouse drive it there. Push the cursor back across the {} edge (the side facing it) or press {} to bring it here.",
+                        edge_title(status.peer_edge.unwrap_or_else(|| status.edge())).to_ascii_lowercase(),
                         hotkey_label(status.hotkey)
                     ))
                     .size(11.0)

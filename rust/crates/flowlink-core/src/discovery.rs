@@ -60,7 +60,11 @@ pub async fn discovery_task(engine: Arc<Engine>, cancel: CancellationToken) {
                         if let Some(device) = device_from_info(&info) {
                             if device.id != engine.own_device_id() {
                                 tracing::debug!(device = %device.name, addr = ?device.addr, "peer discovered");
-                                engine.devices.lock().insert(device.id.clone(), device);
+                                // Scope the guard: `refresh_devices_status`
+                                // takes the same non-reentrant lock.
+                                {
+                                    engine.devices.lock().insert(device.id.clone(), device);
+                                }
                                 engine.refresh_devices_status();
                             }
                         }

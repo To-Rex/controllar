@@ -608,13 +608,28 @@ impl Engine {
             self.status.lock().local.addrs = addrs;
         }
         if tick_count % 2 == 0 {
-            let now = util::now_ms();
+            self.poll_discovered_devices();
+        }
+    }
+
+    /// Prune discovered devices that have not been re-announced for 15 s and
+    /// publish the list.
+    ///
+    /// The devices lock must be **released before** `refresh_devices_status`
+    /// takes it again. Holding it across that call is a self-deadlock on the
+    /// non-reentrant mutex: the command loop froze for good the first time a
+    /// discovered peer aged out (15–30 s after start), which looked exactly
+    /// like "the cursor stops working / returns to its place".
+    fn poll_discovered_devices(&self) {
+        let now = util::now_ms();
+        let pruned = {
             let mut devices = self.devices.lock();
             let before = devices.len();
             devices.retain(|_, d| now.saturating_sub(d.last_seen_ms) < 15_000);
-            if devices.len() != before {
-                self.refresh_devices_status();
-            }
+            devices.len() != before
+        };
+        if pruned {
+            self.refresh_devices_status();
         }
     }
 
@@ -1105,6 +1120,15 @@ impl Engine {
             self.edge_tracker.lock().hint_returned();
         }
         self.set_focused(true);
+        // Tell the user which way the cursor can go back; with automatic edge
+        // sync this is the only place that states the effective side.
+        self.notice(
+            "focus",
+            &format!(
+                "the cursor is on this computer — push it back through your {} edge, or press the toggle hotkey",
+                local.as_str()
+            ),
+        );
         tracing::info!(edge = edge.as_str(), "received the cursor from the peer");
     }
 
@@ -1746,6 +1770,38 @@ mod tests {
         assert_eq!(status["state"], "off");
         assert_eq!(status["app"], "FlowLink");
         assert!(status["local"]["fingerprint"].as_str().unwrap().len() == 64);
+    }
+
+    /// Regression: the tick used to hold the devices lock while calling
+    /// `refresh_devices_status`, which takes the same non-reentrant lock. The
+    /// first time a discovered device aged out (15 s after start) the engine
+    /// froze for good. Use a watchdog so a regression fails instead of hanging
+    /// the test suite.
+    #[test]
+    fn pruning_discovered_devices_does_not_self_deadlock() {
+        let (engine, _dir) = make_engine(Arc::new(NullHost));
+        let stale = DeviceInfo {
+            id: "stale-device".into(),
+            name: "Old peer".into(),
+            fingerprint: "ab".repeat(32),
+            addr: Some("10.0.0.9:24800".into()),
+            port: 24800,
+            role: Some(Mode::Server),
+            version: Some("0.2.2".into()),
+            last_seen_ms: 0,
+        };
+        engine.devices.lock().insert(stale.id.clone(), stale);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let engine2 = engine.clone();
+        std::thread::spawn(move || {
+            engine2.poll_discovered_devices();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("device pruning self-deadlocked");
+        assert!(engine.devices.lock().is_empty());
+        assert!(engine.status.lock().discovered.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

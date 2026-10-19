@@ -53,7 +53,12 @@ One `Engine` instance owns the runtime:
 - **Lock order** — no code path holds the config lock while taking the status
   lock: `notify` reads config before locking status, and `ForgetDevice`
   clones its data before touching status. This ordering was the source of a
-  real ABBA deadlock (UI Forget + a session publishing status).
+  real ABBA deadlock (UI Forget + a session publishing status). The same rule
+  applies to every non-reentrant mutex: the tick releases the `devices` lock
+  before `refresh_devices_status` takes it again (holding it across the call
+  froze the engine the first time a discovered peer aged out, 15–30 s after
+  start — it looked like the cursor stopping or returning to its place).
+  `poll_discovered_devices` is covered by a watchdog regression test.
 - **Pairing** — the server keeps one live `PairingCode`; the client parks a
   typed code in `pending_pair_code`, which the session's pairing flow polls
   at least every 250 ms (no startup races).
@@ -118,8 +123,8 @@ the cursor moves the remote cursor with synthetic events, which the local
 capture path deliberately ignores. Without more, that mouse could never push
 the cursor back. Both shells therefore run a small pure state machine
 (`EdgePushTracker`, implemented and unit-tested in Swift and Rust) over every
-injected move: after `Enter` the pointer must first travel 40 px inside, then
-28 px of outward overshoot at the peer-facing edge triggers
+injected move: after `Enter` the pointer must first travel 32 px inside, then
+20 px of outward overshoot at the peer-facing edge triggers
 `Cmd::HandOff { edge, along }`. The shell also seeds the tracker from
 `Status::peer_edge`, so the server can detect the return even at session
 start, when it owns the cursor but has not received an `Enter` yet. The core

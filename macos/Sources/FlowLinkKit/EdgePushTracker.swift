@@ -14,9 +14,9 @@ import Foundation
 struct EdgePushTracker {
     /// Distance from the peer-facing edge the pointer must reach after
     /// `Enter` before an outward push is accepted (the entry inset is 24 px).
-    static let rearmMargin: Double = 40
+    static let rearmMargin: Double = 32
     /// Outward distance accumulated at the edge that triggers the handoff.
-    static let pushThreshold: Double = 28
+    static let pushThreshold: Double = 20
     /// A handoff that never produced a new `Enter` (the session died) must
     /// not disable edge detection forever.
     static let cooldownNanos: UInt64 = 1_000_000_000

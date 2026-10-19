@@ -15,9 +15,9 @@ use flowlink_core::types::Edge;
 
 /// Distance from the peer-facing edge the pointer must reach after `Enter`
 /// before an outward push is accepted (the entry inset is 24 px).
-pub const REARM_MARGIN: f64 = 40.0;
+pub const REARM_MARGIN: f64 = 32.0;
 /// Outward distance accumulated at the edge that triggers the handoff.
-pub const PUSH_THRESHOLD: f64 = 28.0;
+pub const PUSH_THRESHOLD: f64 = 20.0;
 /// If a handoff never produced a new `Enter` (the session died), allow edge
 /// detection again after this long.
 pub const COOLDOWN_MS: u64 = 1_000;

@@ -15,15 +15,61 @@ enum InjectionMarker {
 public final class Injector {
 
     private let queue = DispatchQueue(label: "app.flowlink.injector")
-    /// Events are posted from a *private* source state so our own event tap
-    /// can tell them apart from physical hardware and never forwards them
-    /// back to the peer (which would loop input).
-    private let source = CGEventSource(stateID: .privateState)
+    /// Events are posted with a NULL source (the platform default for
+    /// synthetic input) and tagged with `InjectionMarker`. The marker — not
+    /// the source state — is what stops the local tap from forwarding our own
+    /// output back to the peer. A private source was previously used here;
+    /// private-state mouse events are not reliably applied to the hardware
+    /// cursor, which made remote-driven movement snap back to its origin.
 
     /// The focused shell's injector saw the synthetic pointer pushed past the
     /// edge facing the peer (physical mouse is on the other desk). The app
     /// forwards this to `flowlink_hand_off`.
     public var onEdgeReturn: ((FLEdge, Double) -> Void)?
+
+    // MARK: Diagnostics
+    //
+    // A tiny, size-capped append-only file makes the remote-injection path
+    // observable without a debugger. It never records key codes or text.
+
+    private var diagHandle: FileHandle?
+    private var diagMovesThisEnter = 0
+    private var diagTotalMoves: UInt64 = 0
+    private var diagQueuedEnterAt: UInt64 = 0
+
+    private func diag(_ message: @autoclosure () -> String) {
+        if diagHandle == nil {
+            guard let base = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first else { return }
+            let dir = base.appendingPathComponent("FlowLink/logs", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("injector-diag.log")
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? NSNumber, size.intValue > 1_000_000
+            {
+                try? FileManager.default.removeItem(at: url)
+            }
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            handle.seekToEndOfFile()
+            diagHandle = handle
+            let version = CoreVersion.string
+            diagWrite("=== FlowLink \(version) injector diagnostics ===")
+        }
+        diagWrite(message())
+    }
+
+    private func diagWrite(_ line: String) {
+        guard let diagHandle else { return }
+        let stamp = String(format: "%.3f", Date().timeIntervalSince1970)
+        if let data = "[\(stamp)] \(line)\n".data(using: .utf8) {
+            diagHandle.write(data)
+            try? diagHandle.synchronize()
+        }
+    }
 
     // State — queue-only.
     private var pressedKeys = Set<UInt16>()
@@ -35,6 +81,8 @@ public final class Injector {
 
     /// Injected-edge return state machine (pure, unit-tested).
     private var edgeTracker = EdgePushTracker()
+    /// Last forwarding state from the status (diagnostics only).
+    private var forwardingHint = false
 
     public init() {}
 
@@ -73,11 +121,23 @@ public final class Injector {
         }
     }
 
+    /// Record the forwarding state for the diagnostic line.
+    public func setForwarding(_ forwarding: Bool) {
+        queue.async { [weak self] in
+            self?.forwardingHint = forwarding
+        }
+    }
+
     /// Update the local edge facing the peer from the engine status. Needed
     /// before the first `Enter` (e.g. the server owns the cursor at startup).
     public func setPeerEdge(_ edge: FLEdge?) {
         queue.async { [weak self] in
-            self?.edgeTracker.setPeerEdge(edge)
+            guard let self else { return }
+            let before = self.edgeTracker.peerEdge
+            self.edgeTracker.setPeerEdge(edge)
+            if before != edge {
+                self.diag("PEER_EDGE \(before.map { "\($0)" } ?? "nil") -> \(edge.map { "\($0)" } ?? "nil")")
+            }
         }
     }
 
@@ -150,6 +210,13 @@ public final class Injector {
         let serverEdge = edge(from: event.flags)
         edgeTracker.enter(remoteEdge: serverEdge)
 
+        diagMovesThisEnter = 0
+        diagQueuedEnterAt = DispatchTime.now().uptimeNanoseconds
+        let before = CGEvent(source: nil)?.location ?? .zero
+        diag(
+            "ENTER remote=\(serverEdge) pos=\(fmt(before)) metrics=\(Int(metrics.width))x\(Int(metrics.height)) origin=\(fmt(metrics.origin)) peer=\(edgeTracker.peerEdge.map { "\($0)" } ?? "nil")"
+        )
+
         let along = max(0.0, min(1.0, event.x))
         // Land a few pixels *inside* the edge so ordinary sideways motion is
         // not mistaken for an edge push.
@@ -182,7 +249,7 @@ public final class Injector {
             return
         }
         let cgEvent = CGEvent(
-            keyboardEventSource: source,
+            keyboardEventSource: nil,
             virtualKey: CGKeyCode(cgKey),
             keyDown: down
         )
@@ -197,7 +264,26 @@ public final class Injector {
         // exactly the "keep pushing" gesture that hands control back.
         detectInjectedEdge(from: current, dx: event.x, dy: event.y)
 
-        let target = CGPoint(x: current.x + event.x, y: current.y + event.y)
+        // Move the hardware cursor explicitly. A posted absolute mouse event
+        // is delivered to apps, but on current macOS it is not a reliable way
+        // to reposition the actual pointer: remote-driven movement could stay
+        // pinned (the "cursor returns to its place" symptom) and the edge
+        // detector never saw the pointer reach the seam. Warp first, then post
+        // the same position so hover/drag consumers receive the event too.
+        let local = metrics.normalized(current)
+        let maxX = max(0, metrics.width - 1)
+        let maxY = max(0, metrics.height - 1)
+        let clamped = CGPoint(
+            x: min(max(local.x + event.x, 0), maxX),
+            y: min(max(local.y + event.y, 0), maxY)
+        )
+        let target = metrics.global(clamped)
+        CGWarpMouseCursorPosition(target)
+        // Keep the hardware pointer associated at the new position; without
+        // this some systems pull the cursor back to the device's old spot on
+        // the next report (the "it returns to where it was" symptom).
+        CGAssociateMouseAndMouseCursorPosition(1)
+
         let type: CGEventType
         if pressedButtons.contains(1) {
             type = .leftMouseDragged
@@ -209,12 +295,28 @@ public final class Injector {
             type = .mouseMoved
         }
         let cgEvent = CGEvent(
-            mouseEventSource: source,
+            mouseEventSource: nil,
             mouseType: type,
             mouseCursorPosition: target,
             mouseButton: .left
         )
+        cgEvent?.setIntegerValueField(.mouseEventDeltaX, value: Int64(event.x.rounded()))
+        cgEvent?.setIntegerValueField(.mouseEventDeltaY, value: Int64(event.y.rounded()))
         post(cgEvent)
+
+        diagTotalMoves += 1
+        diagMovesThisEnter += 1
+        let actual = CGEvent(source: nil)?.location ?? .zero
+        let mismatch = hypot(actual.x - target.x, actual.y - target.y)
+        if diagMovesThisEnter <= 6 || mismatch > 3 || diagTotalMoves % 250 == 0 {
+            diag(
+                "MOVE #\(diagTotalMoves) cur=\(fmt(current)) d=(\(Int(event.x.rounded())),\(Int(event.y.rounded()))) target=\(fmt(target)) actual=\(fmt(actual)) err=\(String(format: "%.1f", mismatch)) peer=\(edgeTracker.peerEdge.map { "\($0)" } ?? "nil") forwarding=\(forwardingHint)"
+            )
+        }
+    }
+
+    private func fmt(_ p: CGPoint) -> String {
+        String(format: "(%.1f,%.1f)", p.x, p.y)
     }
 
     private func handleMouseButton(_ event: FlInputEvent) {
@@ -238,7 +340,7 @@ public final class Injector {
         }
         let pos = CGEvent(source: nil)?.location ?? .zero
         let cgEvent = CGEvent(
-            mouseEventSource: source,
+            mouseEventSource: nil,
             mouseType: type,
             mouseCursorPosition: pos,
             mouseButton: button
@@ -255,7 +357,7 @@ public final class Injector {
         let dy = Int32(clamping: Int((event.y * scale).rounded()))
         let dx = Int32(clamping: Int((event.x * scale).rounded()))
         guard let cgEvent = CGEvent(
-            scrollWheelEvent2Source: source,
+            scrollWheelEvent2Source: nil,
             units: .pixel,
             wheelCount: 2,
             wheel1: dy,
@@ -275,7 +377,7 @@ public final class Injector {
             }
             let pos = CGEvent(source: nil)?.location ?? .zero
             post(CGEvent(
-                mouseEventSource: source,
+                mouseEventSource: nil,
                 mouseType: type,
                 mouseCursorPosition: pos,
                 mouseButton: cgButton
@@ -286,7 +388,7 @@ public final class Injector {
         for usage in pressedKeys {
             if let cgKey = KeyCodes.cgKeyCode(fromHID: usage) {
                 post(CGEvent(
-                    keyboardEventSource: source,
+                    keyboardEventSource: nil,
                     virtualKey: CGKeyCode(cgKey),
                     keyDown: false
                 ))
@@ -319,6 +421,7 @@ public final class Injector {
             height: metrics.height,
             nowNanos: DispatchTime.now().uptimeNanoseconds
         ) else { return }
+        diag("HANDOFF edge=\(edge) along=\(String(format: "%.3f", along))")
         onEdgeReturn?(edge, along)
     }
 
@@ -332,7 +435,7 @@ public final class Injector {
                   let cgKey = KeyCodes.cgKeyCode(fromHID: usage) else { continue }
             heldModifiers = want ? (heldModifiers | flag) : (heldModifiers & ~flag)
             let cgEvent = CGEvent(
-                keyboardEventSource: source,
+                keyboardEventSource: nil,
                 virtualKey: CGKeyCode(cgKey),
                 keyDown: want
             )

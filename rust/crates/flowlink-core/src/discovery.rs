@@ -119,7 +119,7 @@ fn desired_announce(engine: &Arc<Engine>) -> Option<AnnounceState> {
         fullname: String::new(), // filled by register()
         id: cfg.device_id,
         name: cfg.device_name,
-        port: cfg.listen_port,
+        port: engine.effective_listen_port(),
         fingerprint: engine.identity.fingerprint.clone(),
     })
 }

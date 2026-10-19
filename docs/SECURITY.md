@@ -16,7 +16,7 @@ compromised.
 | Eavesdropping on the LAN | TLS 1.3 on every connection; no plaintext mode |
 | Machine-in-the-middle | Certificate fingerprint pinning on reconnect; TOFU with an on-screen pairing code on first contact |
 | Rogue device claiming a known id | Pairing token check (constant-time), bound to the `Hello` device id |
-| Replay of a captured pairing code | Code is single-use, expires after 120 s, dies after 3 wrong attempts |
+| Replay of a captured pairing code | Code is single-use, expires after 10 min, dies after 5 wrong attempts |
 | Token theft from disk | Token stored `0600` in a `0700` directory; boundary is the OS user account |
 | Clipboard leakage of passwords | Concealed/transient pasteboard types are never relayed; text-only, size-capped |
 | Secret leakage via logs | Clipboard contents, keys, codes and tokens are never logged |
@@ -48,8 +48,11 @@ rests on the user comparing/typing information from the server's screen.
 ## Pairing ceremony
 
 1. As long as the server is listening it holds one live pairing code:
-   a random 6-digit number whose first digit is non-zero, TTL 120 s
-   (`DEFAULT_TTL_MS`), 3 attempts (`MAX_ATTEMPTS`).
+   a random 6-digit number whose first digit is non-zero, TTL 10 min
+   (`DEFAULT_TTL_MS`), 5 attempts (`MAX_ATTEMPTS`). The generous TTL removes
+   the copy/paste race (read the code, walk over, type it) while staying
+   safe: five attempts per rotation leave brute force impractical, and the
+   code is single-use.
 2. The code is displayed on the server (and embedded in the QR / invite link
    shown there). The client submits it via `PairRequest`; verification is
    constant-time.

@@ -13,7 +13,7 @@ tanishtiriladi va keyin o‘zaro eslab qolinadi.
 |---|---|
 | **Server** | Boshqaruvchi kompyuter. Uning klaviaturasi/sichqonchasi chetga o‘tganda narigi kompyuterni boshqaradi. |
 | **Client** | Boshqariladigan kompyuter. Undan serverga qaytish ham mumkin (kursorni orqaga surish yoki hotkey orqali). |
-| **Juftlik kodi** | Server ekranida ko‘rinadigan 6 xonali kod. 2 daqiqa amal qiladi, 3 marta xato kiritilsa yangilanadi. |
+| **Juftlik kodi** | Server ekranida ko‘rinadigan 6 xonali kod. 10 daqiqa amal qiladi, 5 marta xato kiritilsa yangilanadi. |
 | **Hotkey** | Boshqaruvni almashtiruvchi tugmalar birikmasi. Standart: `Ctrl + Alt + Space`. |
 | **Chet (edge)** | Server kursori qaysi tomondan chiqib narigi kompyuterga o‘tadi (chap/o‘ng/yuqori/past). |
 
@@ -105,6 +105,7 @@ client avtomatik ulanadi (token orqali, kodsiz).
 | Muammo | Yechim |
 |---|---|
 | **Windows: QR/kod ko‘rinmayapti, „No pairing code yet“** | Odatda ikki sabab: (1) ilova ikki nusxada ochilgan — tray’dagi barcha FlowLink nusxalarini **Quit** qilib, faqat bittasini ishga tushiring (yangi versiya buni avtomatik bloklaydi va ogohlantiradi); (2) server rejimda emas — Sozlamalarda **Server** rejimini tanlab **Start** bosing. |
+| **Port band (masalan 24800 ishlatilib bo‘lingan)** | Endi tashvishlanmang: FlowLink avtomatik keyingi bo‘sh portga o‘tadi (24801, 24802…) va buni o‘zi bildiradi. QR/invite link va tarmoqda ko‘rinish **haqiqiy portni** ishlatadi — hech narsa qo‘lda o‘zgartirish shart emas. |
 | **Windows serverga ulanib bo‘lmayapti (eng ko‘p uchraydigan sabab!)** | Windows server sahifasida **NETWORK** kartasini toping → **Allow through firewall…** tugmasini bosing (bir marta administrator ruxsati so‘raladi) → qoidalar qo‘shiladi. Shu tugma TCP 24800 va UDP 5353 qoidalarini yaratadi. Qo‘lda ham mumkin (admin CMD): `netsh advfirewall firewall add rule name="FlowLink" dir=in action=allow protocol=TCP localport=24800` |
 | **„Found on this network“ ro‘yxatida server ko‘rinmayapti** | Windows Firewall discovery (UDP 5353) ni bloklayapti yoki routerda „client isolation“ yoqilgan. Yechim: serverdagi **NETWORK** kartasidagi manzilni (masalan `192.168.1.50:24800`) clientda **Connect manually**ga kiriting — bu har doim ishlaydi. |
 | **Umuman ulanmayapti (Wi-Fi ↔ Ethernet)** | Ikkala kompyuter **bitta router/tarmoqda** bo‘lishi kerak. Birinchi tekshiruv: Windows’da `ipconfig` → `192.168.x.x`, Mac’da `ifconfig` → bir xil `192.168.x.*` bo‘lishi kerak. Windows’da firewall ruxsatini bajaring (yuqoriga qarang). |
@@ -126,7 +127,7 @@ client avtomatik ulanadi (token orqali, kodsiz).
   pinlanadi. Qayta ulanishda barmoq izi o‘zgargan bo‘lsa, aloqa **to‘xtatiladi**.
 - Juftlash tokeni faqat juftlash paytida TLS ichida uzatiladi va faylda
   0600 ruxsat bilan saqlanadi.
-- QR/kod 2 daqiqa amal qiladi — uni begonalarga yubormang.
+- QR/kod 10 daqiqa amal qiladi — uni begonalarga yubormang.
 - Batafsil: `docs/SECURITY.md`.
 
 ## 8. Sozlamalar va fayllar joyi

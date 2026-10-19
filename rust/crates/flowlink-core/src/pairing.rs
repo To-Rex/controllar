@@ -9,10 +9,15 @@
 use subtle::ConstantTimeEq;
 
 /// How long a generated code stays valid.
-pub const DEFAULT_TTL_MS: u64 = 120_000;
+///
+/// Deliberately generous: the user must be able to read the code off the
+/// server's screen, walk to the other computer (or copy the invite link into
+/// a chat) and still make it. Brute force stays impractical because the code
+/// dies after [`MAX_ATTEMPTS`] wrong entries and is single-use.
+pub const DEFAULT_TTL_MS: u64 = 600_000;
 
 /// Wrong attempts allowed before the code is invalidated.
-pub const MAX_ATTEMPTS: u8 = 3;
+pub const MAX_ATTEMPTS: u8 = 5;
 
 /// A live pairing code.
 #[derive(Clone, Debug)]
@@ -134,18 +139,14 @@ mod tests {
     fn wrong_attempts_decrement_and_exhaust() {
         let mut pc = PairingCode::generate_default();
         let now = crate::util::now_ms();
-        assert_eq!(
-            pc.verify("000000", now),
-            PairVerdict::Wrong { attempts_left: 2 }
-        );
-        assert_eq!(
-            pc.verify("000000", now),
-            PairVerdict::Wrong { attempts_left: 1 }
-        );
-        assert_eq!(
-            pc.verify("000000", now),
-            PairVerdict::Wrong { attempts_left: 0 }
-        );
+        for expected in (0..MAX_ATTEMPTS).rev() {
+            assert_eq!(
+                pc.verify("000000", now),
+                PairVerdict::Wrong {
+                    attempts_left: expected
+                }
+            );
+        }
         assert_eq!(pc.verify(&pc.code.clone(), now), PairVerdict::Exhausted);
     }
 

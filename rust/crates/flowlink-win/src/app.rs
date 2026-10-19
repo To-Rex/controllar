@@ -1441,12 +1441,16 @@ impl WinApp {
                         .color(theme.text_dim),
                 );
                 ui.horizontal(|ui| {
-                    ui.add(
+                    let entry = ui.add(
                         egui::TextEdit::singleline(&mut self.pair_code_edit)
                             .hint_text("123456")
                             .desired_width(110.0),
                     );
-                    if ui.button("Pair").clicked() {
+                    // Enter submits too — typing 6 digits and hitting Enter is
+                    // the natural flow.
+                    let submitted =
+                        entry.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("Pair").clicked() || submitted {
                         let code = self.pair_code_edit.trim().to_string();
                         if !code.is_empty() {
                             self.engine.execute(Cmd::SubmitPairCode(code));

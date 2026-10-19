@@ -68,6 +68,14 @@ rough edge — not a bug to be filed anonymously.
 
 ## Cross-platform
 
+- **The listen port may shift automatically.** If the configured port (24800
+  by default) is busy, the server binds the next free one and says so; the
+  real port is what appears in the status, the invite link/QR and the mDNS
+  announcement, so peers always dial the right place. Invite links therefore
+  stay valid across a port fallback.
+- **The pairing code is valid for 10 minutes** and survives failed connection
+  attempts (a dropped connection no longer forces a retype). It dies after
+  five wrong entries and is single-use; the server then rotates it.
 - **Mouse deltas are 1:1, not DPI-scaled.** Relative pixels captured on one
   side are injected as relative pixels on the other. A very high-DPI server
   driving a low-DPI client can feel fast (and the reverse sluggish);

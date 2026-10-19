@@ -331,6 +331,10 @@ public struct DashboardView: View {
                     .padding(8)
                     .background(DS.cardAlt, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(DS.border, lineWidth: 1))
+                    .onSubmit {
+                        model.submitCode(manualCode)
+                        manualCode = ""
+                    }
                 Button("Pair") {
                     model.submitCode(manualCode)
                     manualCode = ""

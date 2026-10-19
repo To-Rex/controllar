@@ -103,7 +103,7 @@ elevated windows.
 ## First connection
 
 1. On the server, open FlowLink — it starts listening on TCP port 24800 (configurable)
-   and shows a 6-digit pairing code, valid for 120 s, plus a QR code.
+   and shows a 6-digit pairing code, valid for 10 minutes, plus a QR code.
 2. On the client, either pick the server from the discovered list, enter
    `host:port` manually, scan the QR code, or paste a link, e.g.
    `flowlink://connect?h=192.168.1.24&p=24800&fp=<fingerprint>&c=123456`.
@@ -138,7 +138,7 @@ artifacts (see [docs/BUILD.md](docs/BUILD.md#ci)).
   pinning on every reconnect; a fingerprint mismatch aborts before any
   secret is sent.
 - TOFU on first contact, gated by a 6-digit, single-use pairing code that is
-  shown only on the server screen (TTL 120 s, 3 attempts, then auto-rotation).
+  shown only on the server screen (TTL 10 min, 5 attempts, then auto-rotation).
 - Pairing exchanges a 32-byte random token, stored `0600` in the config
   directory (`0700`); later connections compare it in constant time.
 - Clipboard relay is text-only and size-limited; no keys or clipboard

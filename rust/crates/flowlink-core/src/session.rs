@@ -70,31 +70,53 @@ pub async fn server_loop(engine: Arc<Engine>, cancel: CancellationToken) -> Resu
 
     let acceptor = transport::tls_acceptor(&engine.identity).context("TLS setup")?;
 
-    // Bind with retries: restarting the listener (mode/port change) may race
-    // the old socket's release by a few milliseconds.
-    let mut listener = None;
-    for attempt in 0..25 {
-        if cancel.is_cancelled() {
-            return Ok(());
+    // Bind the configured port first (with short retries for the restart
+    // race), then fall back to the next few ports when it is genuinely busy
+    // — the actual port is announced via mDNS and carried by invite links,
+    // so the peer never needs to know which one was used.
+    let mut bound: Option<(tokio::net::TcpListener, u16)> = None;
+    let mut last_error = None;
+    'ports: for offset in 0..10u16 {
+        let candidate = cfg.listen_port.saturating_add(offset);
+        if candidate == 0 {
+            continue;
         }
-        match transport::bind_listener(cfg.listen_port).await {
-            Ok(bound) => {
-                listener = Some(bound);
-                break;
+        let attempts = if offset == 0 { 15 } else { 2 };
+        for attempt in 0..attempts {
+            if cancel.is_cancelled() {
+                return Ok(());
             }
-            Err(err) => {
-                if attempt == 24 {
-                    engine.fail(format!("cannot listen on port {}: {err}", cfg.listen_port));
-                    return Ok(());
+            match transport::bind_listener(candidate).await {
+                Ok(listener) => {
+                    bound = Some((listener, candidate));
+                    break 'ports;
                 }
-                tracing::debug!("port {} busy, retrying… ({err})", cfg.listen_port);
-                tokio::time::sleep(Duration::from_millis(120)).await;
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempt + 1 < attempts {
+                        tokio::time::sleep(Duration::from_millis(120)).await;
+                    }
+                }
             }
         }
     }
-    let Some(listener) = listener else {
+    let Some((listener, port)) = bound else {
+        let err = last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "no free port".to_string());
+        engine.fail(format!("cannot listen on port {}: {err}", cfg.listen_port));
         return Ok(());
     };
+    engine.set_actual_port(port);
+    if port != cfg.listen_port {
+        engine.notice(
+            "network",
+            &format!(
+                "Port {} is busy — listening on {} instead (invite links and discovery use the new port automatically).",
+                cfg.listen_port, port
+            ),
+        );
+    }
 
     engine
         .listening
@@ -103,7 +125,7 @@ pub async fn server_loop(engine: Arc<Engine>, cancel: CancellationToken) -> Resu
     engine.set_state(ConnState::Listening);
     engine.refresh_pairing_status();
     engine.notify();
-    tracing::info!(port = cfg.listen_port, "listening for clients");
+    tracing::info!(port, "listening for clients");
 
     loop {
         tokio::select! {
@@ -542,13 +564,19 @@ async fn client_pairing_flow(
     cancel: &CancellationToken,
 ) -> Result<String> {
     let cfg = engine.cfg.lock().clone();
-    let mut pending_code = target.code.clone();
+    // The code may come with this attempt (link/QR) or from the mailbox
+    // (typed earlier). The mailbox copy is *not* consumed here so a transport
+    // failure between attempts does not lose it.
+    let mut pending_code = target
+        .code
+        .clone()
+        .or_else(|| engine.pending_pair_code.lock().clone());
     let deadline = tokio::time::Instant::now() + PAIR_WINDOW;
     let mut sent_any = false;
 
     loop {
         if pending_code.is_none() {
-            pending_code = engine.pending_pair_code.lock().take();
+            pending_code = engine.pending_pair_code.lock().clone();
         }
         if let Some(code) = pending_code.take() {
             send(
@@ -578,9 +606,14 @@ async fn client_pairing_flow(
                     Message::PairResult { ok, reason, token, attempts_left } => {
                         if ok {
                             let token = token.ok_or_else(|| anyhow!("pairing succeeded without token"))?;
+                            // One-time code: never reuse it.
+                            *engine.pending_pair_code.lock() = None;
                             tracing::info!("pairing complete");
                             return Ok(token);
                         }
+                        // The server rejected this code (wrong or expired):
+                        // drop it so we do not burn attempts on a dead code.
+                        *engine.pending_pair_code.lock() = None;
                         let reason = reason.unwrap_or_else(|| "pairing rejected".to_string());
                         tracing::warn!(%reason, "pairing rejected");
                         engine.notice("pairing", &reason);

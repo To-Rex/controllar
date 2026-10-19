@@ -118,6 +118,9 @@ pub struct Engine {
     pub runtime: Runtime,
     pub started_ms: u64,
     pub listening: AtomicBool,
+    /// The port the listener is actually bound to (0 = not bound); differs
+    /// from the configured port when that one was busy and we fell back.
+    pub actual_port: Mutex<u16>,
     cmd_tx: UnboundedSender<Cmd>,
     _log_guard: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>>,
 }
@@ -164,6 +167,7 @@ impl Engine {
             flusher: Mutex::new(None),
             started_ms: util::now_ms(),
             listening: AtomicBool::new(false),
+            actual_port: Mutex::new(0),
             cmd_tx,
             identity,
             config_dir,
@@ -245,10 +249,26 @@ impl Engine {
         &self.config_dir
     }
 
+    /// The port the listener is actually bound to, falling back to the
+    /// configured one when nothing is bound yet. Invite links, discovery and
+    /// the status snapshot all use this value.
+    pub fn effective_listen_port(&self) -> u16 {
+        let actual = *self.actual_port.lock();
+        if actual != 0 {
+            actual
+        } else {
+            self.cfg.lock().listen_port
+        }
+    }
+
+    pub fn set_actual_port(&self, port: u16) {
+        *self.actual_port.lock() = port;
+    }
+
     /// QR code for the current pairing session (invite link with address,
     /// fingerprint and code).
     pub fn pairing_qr(&self) -> Result<QrMatrix> {
-        let port = self.cfg.lock().listen_port;
+        let port = self.effective_listen_port();
         let code = self
             .pairing
             .lock()
@@ -262,7 +282,7 @@ impl Engine {
 
     /// Invite link text (same content as the QR).
     pub fn invite_link(&self) -> String {
-        let port = self.cfg.lock().listen_port;
+        let port = self.effective_listen_port();
         let code = self
             .pairing
             .lock()
@@ -496,7 +516,8 @@ impl Engine {
                     drop(cfg);
                     self.save_config(&cfg_snapshot);
                 }
-                self.status.lock().local.port = port;
+                // A new preference invalidates the fallback binding.
+                self.set_actual_port(0);
                 // Restart the listener if (and only if) it is already running.
                 let running = self.run.lock().is_some();
                 if running && self.cfg.lock().mode == Mode::Server {
@@ -544,6 +565,7 @@ impl Engine {
         status.metrics.uptime_ms = util::now_ms().saturating_sub(self.started_ms);
         status.listening = self.listening.load(Ordering::Relaxed);
         status.clipboard_max_bytes = self.cfg.lock().clipboard_max_bytes;
+        status.local.port = self.effective_listen_port();
     }
 
     pub fn refresh_devices_status(&self) {
@@ -602,6 +624,7 @@ impl Engine {
         }
         self.deregister_session();
         *self.pending_pair_code.lock() = None;
+        self.set_actual_port(0);
         {
             let mut status = self.status.lock();
             status.state = ConnState::Off;
@@ -1354,7 +1377,9 @@ mod tests {
 
         // Wrong attempt.
         match engine.verify_pair_code("000000") {
-            PairVerdict::Wrong { attempts_left } => assert_eq!(attempts_left, 2),
+            PairVerdict::Wrong { attempts_left } => {
+                assert_eq!(attempts_left, pairing::MAX_ATTEMPTS - 1)
+            }
             other => panic!("unexpected verdict: {other:?}"),
         }
         // Correct attempt.

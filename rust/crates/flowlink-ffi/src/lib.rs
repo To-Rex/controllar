@@ -567,6 +567,25 @@ pub unsafe extern "C" fn flowlink_set_device_name(core: *mut FlCore, name: *cons
     }
 }
 
+/// Report whether the shell's local input source (event tap / hook) is live.
+///
+/// The core logs every transition and shows a notice while capture is down,
+/// so a dead tap can never look like a dead hotkey.
+///
+/// # Safety
+/// `core` must be a valid handle from [`flowlink_new`]; `reason` must be a
+/// valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn flowlink_set_input_capture(
+    core: *mut FlCore,
+    active: i32,
+    reason: *const c_char,
+) {
+    if let Some(engine) = engine(core) {
+        engine.set_input_capture(active != 0, cstr_to_string(reason));
+    }
+}
+
 /// Set the local edge the cursor exits through (server role).
 ///
 /// # Safety

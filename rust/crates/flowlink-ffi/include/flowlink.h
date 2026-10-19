@@ -198,6 +198,13 @@ void flowlink_set_clipboard_text(FlCore *core, const char *utf8_text);
 /** Rename this device. */
 void flowlink_set_device_name(FlCore *core, const char *name);
 
+/**
+ * Report whether the shell's local input source (event tap / hook) is
+ * capturing. active = 0 makes the core log a warning and show a notice with
+ * `reason` (may be null).
+ */
+void flowlink_set_input_capture(FlCore *core, int active, const char *reason);
+
 /** Local edge the cursor exits through (server role): FL_EDGE_*. */
 void flowlink_set_edge(FlCore *core, int32_t edge);
 

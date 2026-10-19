@@ -104,11 +104,23 @@ Client (is driven):
 session pump ──► Engine::handle_incoming_input ──► Host::on_input ──► Injector
 ```
 
-Events are dropped unless `remote_active`, except `Enter` and `ReleaseAll`.
+Events are dropped unless `forwarding`, except `Enter` and `ReleaseAll`.
 The macOS injector owns a private serial queue, warps the cursor to the
 mirrored edge on `Enter`, injects via `CGEvent` (`.cghidEventTap`), and calls
 back (`→ Cmd::RequestControl` → `Message::Reclaim`) when the user pushes the
 cursor past the return edge.
+
+Session pump guarantees (`session.rs`): reads go through a `FrameReader` that
+keeps partial reads in the reader itself, so a `tokio::select!` branch
+(heartbeat, outbound message) winning a race mid-frame can no longer drop
+buffered bytes and desync the stream. Heartbeats and replies are written from
+the same loop; session messages (input, clipboard, focus) are applied on an
+ordered side task so a slow handler can never stall heartbeats. Every teardown
+— including handshake-level failures — sends a best-effort `Bye { reason }`
+and shuts TLS down cleanly, so the peer logs the reason instead of an
+unexplained `closed without TLS close_notify`. An outbound message over
+`MAX_FRAME_BYTES` (4 MiB) is dropped with a warning instead of killing the
+session.
 
 ## Threading model
 
@@ -182,10 +194,12 @@ jitter bounds, reset), `clipboard` (echo suppression, size limits, disabled),
 recovery, device memory), `crypto` (identity reload, fingerprint
 normalization), `edge` (activation, hysteresis, mirrored enter geometry),
 `engine` (initial state, command persistence, pairing workflow), `framing`
-(single/many frames, EOF handling, oversized rejection), `hid` (modifier
+(single/many frames, EOF handling, oversized rejection, partial-frame
+survival when a future is dropped mid-read), `hid` (modifier
 flags), `host` (notice JSON), `pairing` (code shape, attempts, expiry,
 constant-time compare), `protocol` (message round-trips, garbage rejection),
-`qr` (link round-trip, noisy parse, defaults), `transport` (TLS round-trip,
+`session` (oversized outbound skipped, stream stays framed), `qr` (link
+round-trip, noisy parse, defaults), `transport` (TLS round-trip,
 fingerprint visibility), `util` (clock/hostname sanity), plus FFI conversion
 tests and Swift `KeyCodes` tests.
 

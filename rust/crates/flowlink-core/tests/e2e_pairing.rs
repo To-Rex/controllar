@@ -197,6 +197,19 @@ async fn two_engines_pair_and_exchange_input() {
         )
         .await;
 
+        // Compat: older shells read `remote_active`; it must always mirror
+        // `forwarding` so both directions stay in agreement.
+        assert_eq!(
+            server_host.remote_active(),
+            server_host.forwarding(),
+            "remote_active must mirror forwarding on the server"
+        );
+        assert_eq!(
+            client_host.remote_active(),
+            client_host.forwarding(),
+            "remote_active must mirror forwarding on the client"
+        );
+
         let enter = client_host
             .inputs()
             .into_iter()

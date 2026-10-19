@@ -147,6 +147,17 @@ public final class CoreBridge {
         }
     }
 
+    /// Report whether the local input source (event tap / hook) is capturing.
+    /// The core logs transitions so a dead tap can never look like a dead
+    /// hotkey; `reason` is only used while `active` is false.
+    public func setInputCapture(active: Bool, reason: String?) {
+        withHandle { handle in
+            (reason ?? "").withCString {
+                flowlink_set_input_capture(handle, active ? 1 : 0, $0)
+            }
+        }
+    }
+
     public func setEdge(_ edge: FLEdge) {
         let value: Int32
         switch edge {

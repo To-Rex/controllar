@@ -124,6 +124,15 @@ pub struct Engine {
     pub runtime: Runtime,
     pub started_ms: u64,
     pub listening: AtomicBool,
+    /// True once local input reached the engine in the current session; used
+    /// to log one confirmation per session that the shell's capture path is
+    /// alive (a dead event tap otherwise looks exactly like a dead hotkey).
+    input_seen: AtomicBool,
+    /// Rate limiter for the "local input ignored" warning.
+    input_ignored_at: Mutex<Option<std::time::Instant>>,
+    /// `Some(reason)` while the shell's local input source (macOS event tap /
+    /// Windows hook) is not capturing, as reported by the platform shell.
+    input_capture: Mutex<Option<String>>,
     /// The port the listener is actually bound to (0 = not bound); differs
     /// from the configured port when that one was busy and we fell back.
     pub actual_port: Mutex<u16>,
@@ -175,6 +184,9 @@ impl Engine {
             flusher: Mutex::new(None),
             started_ms: util::now_ms(),
             listening: AtomicBool::new(false),
+            input_seen: AtomicBool::new(false),
+            input_ignored_at: Mutex::new(None),
+            input_capture: Mutex::new(None),
             actual_port: Mutex::new(0),
             cmd_tx,
             identity,
@@ -674,7 +686,11 @@ impl Engine {
     fn handle_host_input(self: &Arc<Self>, ev: HostInput) {
         // Input only means something while a peer session is live.
         if !self.has_session() || self.status.lock().state != ConnState::Connected {
+            self.note_input_ignored();
             return;
+        }
+        if !self.input_seen.swap(true, Ordering::Relaxed) {
+            tracing::info!("local input is reaching the engine");
         }
 
         // Hotkey first, on both sides.
@@ -757,12 +773,72 @@ impl Engine {
         }
     }
 
+    /// Rate-limited diagnostic for input that must be dropped (no session or
+    /// not connected). Without it, "the hotkey does nothing" left no trace at
+    /// all — every dead window looked identical to a broken capture path.
+    fn note_input_ignored(&self) {
+        let mut slot = self.input_ignored_at.lock();
+        let now = std::time::Instant::now();
+        let stale = slot.is_none_or(|at| now.duration_since(at).as_secs() >= 5);
+        if stale {
+            *slot = Some(now);
+            let state = self.status.lock().state;
+            let has_session = self.session.lock().is_some();
+            tracing::warn!(
+                state = ?state,
+                session = has_session,
+                "local input ignored — no live peer session (hotkey and edge moves do nothing)"
+            );
+        }
+    }
+
+    /// Report whether the shell's local input source (macOS event tap,
+    /// Windows hook) is capturing. Every transition is logged so a dead event
+    /// tap can never masquerade as a dead hotkey again.
+    pub fn set_input_capture(&self, active: bool, reason: Option<String>) {
+        let new = if active {
+            None
+        } else {
+            Some(reason.unwrap_or_else(|| "local input capture is not active".to_string()))
+        };
+        {
+            let mut slot = self.input_capture.lock();
+            if *slot == new {
+                return;
+            }
+            *slot = new.clone();
+        }
+        match new {
+            Some(reason) => {
+                tracing::warn!(
+                    %reason,
+                    "local input capture is NOT active — this computer's keyboard and mouse cannot drive the peer"
+                );
+                self.notice("permissions", &reason);
+            }
+            None => tracing::info!("local input capture is active"),
+        }
+    }
+
     /// Hand the shared cursor to the peer through `edge` (the side losing it).
     fn give_focus(self: &Arc<Self>, edge: Edge, along_norm: f32) {
         if !self.focused.load(Ordering::Relaxed) {
             return;
         }
-        self.push_to_peer(Message::Input(InputEvent::Enter { edge, along_norm }));
+        if !self.push_to_peer(Message::Input(InputEvent::Enter { edge, along_norm })) {
+            // Never flip local state without the peer knowing: that is the
+            // desync that used to leave both sides believing different
+            // computers owned the cursor (dead keyboards on both ends).
+            tracing::warn!(
+                edge = edge.as_str(),
+                "focus handoff not delivered — no live session, keeping the cursor here"
+            );
+            self.notice(
+                "error",
+                "cannot hand over the cursor — the computers are not connected",
+            );
+            return;
+        }
         self.set_focused(false);
         self.notice("focus", "the cursor is now on the other computer");
         tracing::info!(edge = edge.as_str(), "gave focus to the peer");
@@ -774,7 +850,14 @@ impl Engine {
             return;
         }
         // The side that currently shows the cursor must stop showing it.
-        self.push_to_peer(Message::Reclaim);
+        if !self.push_to_peer(Message::Reclaim) {
+            tracing::warn!("focus reclaim not delivered — no live session, keeping the cursor on the peer");
+            self.notice(
+                "error",
+                "cannot take the cursor — the computers are not connected",
+            );
+            return;
+        }
         self.set_focused(true);
         // Appear at the edge facing the peer: the host mirrors `Enter.edge`,
         // so passing the opposite of our own edge lands on our own edge.
@@ -1006,6 +1089,7 @@ impl Engine {
     /// Called once a session is fully ready. The server's screen owns the
     /// cursor at the start; the client begins by forwarding its input.
     pub fn on_session_ready(self: &Arc<Self>, role: Mode) {
+        self.input_seen.store(false, Ordering::Relaxed);
         self.set_focused(role == Mode::Server);
         if role == Mode::Server {
             // Fresh session with the pointer at a normal position: the edge

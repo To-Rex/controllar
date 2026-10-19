@@ -55,5 +55,14 @@ fi
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || \
   echo "warning: ad-hoc codesign failed (the app still runs, permissions may re-prompt)"
 
+echo ""
+echo "  NOTE: the app is ad-hoc signed, so its code identity just changed."
+echo "  macOS may have revoked the privacy permissions with it."
+echo "  After EVERY rebuild, re-grant them (toggle OFF then ON):"
+echo "    System Settings -> Privacy & Security -> Accessibility    -> FlowLink"
+echo "    System Settings -> Privacy & Security -> Input Monitoring -> FlowLink"
+echo "  Without them FlowLink cannot capture this Mac's keyboard/mouse"
+echo "  (the app shows a banner and the log records the reason)."
+echo ""
 echo "==> done: $APP"
 echo "    run with: open \"$APP\""

@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::backoff::Backoff;
 use crate::config::Config;
 use crate::engine::Engine;
-use crate::framing;
+use crate::framing::{self, FrameReader};
 use crate::pairing::{self, PairVerdict};
 use crate::protocol::{self, Hello, HelloAck, Message, PROTOCOL_VERSION};
 use crate::status::ConnState;
@@ -169,18 +170,43 @@ async fn run_server_session(
     cancel: CancellationToken,
     acceptor: tokio_rustls::TlsAcceptor,
 ) -> Result<()> {
-    let mut stream = Stream::Server(
+    let stream = Stream::Server(
         tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp))
             .await
             .context("TLS handshake timed out")?
             .context("TLS handshake failed")?,
     );
+    // Read and write directions are handled by the same task but kept in
+    // separate halves so the pump can select on a cancellation-safe
+    // FrameReader while heartbeats and replies write out.
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut reader = FrameReader::new(read_half);
+    let mut writer = write_half;
 
-    let hello = match read_message_timeout(&mut stream, HANDSHAKE_TIMEOUT).await {
+    let result =
+        server_session_with(engine.clone(), &mut reader, &mut writer, peer, cancel).await;
+    // Handshake-level failures never reach the pump, so explain them here:
+    // the peer logs the reason instead of "peer closed connection without
+    // sending TLS close_notify", which made every teardown look like a crash.
+    if let Err(err) = &result {
+        let _ = send(&mut writer, &Message::Bye { reason: format!("{err:#}") }).await;
+    }
+    let _ = writer.shutdown().await;
+    result
+}
+
+async fn server_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    engine: Arc<Engine>,
+    reader: &mut FrameReader<R>,
+    writer: &mut W,
+    peer: std::net::SocketAddr,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let hello = match read_message_timeout(reader, HANDSHAKE_TIMEOUT).await {
         Ok(Message::Hello(hello)) => hello,
         Ok(other) => {
             let _ = send(
-                &mut stream,
+                writer,
                 &Message::Bye {
                     reason: "expected Hello".into(),
                 },
@@ -196,7 +222,7 @@ async fn run_server_session(
 
     if hello.protocol != PROTOCOL_VERSION {
         let _ = send(
-            &mut stream,
+            writer,
             &Message::Bye {
                 reason: format!(
                     "protocol version mismatch: this server speaks {PROTOCOL_VERSION}, the client speaks {} — update FlowLink on both computers",
@@ -214,7 +240,7 @@ async fn run_server_session(
     // Single-client policy: politely refuse while busy.
     if engine.has_session() {
         let _ = send(
-            &mut stream,
+            writer,
             &Message::Bye {
                 reason: "server is busy with another client".into(),
             },
@@ -232,7 +258,7 @@ async fn run_server_session(
         version: crate::VERSION.to_string(),
         known_device: paired.is_some(),
     });
-    send(&mut stream, &ack).await?;
+    send(writer, &ack).await?;
     engine.set_connecting_peer(&hello, &peer.to_string());
     engine.notice(
         "peer",
@@ -262,10 +288,10 @@ async fn run_server_session(
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             _ = tokio::time::sleep_until(deadline) => {
-                let _ = send(&mut stream, &Message::Bye { reason: "pairing timed out".into() }).await;
+                let _ = send(writer, &Message::Bye { reason: "pairing timed out".into() }).await;
                 return Err(anyhow!("auth timed out for {}", hello.name));
             }
-            msg = read_message(&mut stream) => {
+            msg = read_message(reader) => {
                 match msg? {
                     Message::Authenticate { device_id, token } => {
                         let device = engine.cfg.lock().find_paired(&device_id).cloned();
@@ -275,13 +301,13 @@ async fn run_server_session(
                                 .map(|d| pairing::token_matches(&d.token, &token))
                                 .unwrap_or(false);
                         if ok {
-                            send(&mut stream, &Message::AuthResult { ok: true, reason: None }).await?;
+                            send(writer, &Message::AuthResult { ok: true, reason: None }).await?;
                             engine.touch_paired_device(&device_id, &peer.to_string());
                             tracing::info!(client = %hello.name, "client authenticated");
                             break;
                         }
                         send(
-                            &mut stream,
+                            writer,
                             &Message::AuthResult { ok: false, reason: Some("unknown device or invalid token".into()) },
                         )
                         .await?;
@@ -295,7 +321,7 @@ async fn run_server_session(
                                 let token = pairing::generate_token();
                                 engine.remember_paired_device(&device_id, &name, &token, &peer.to_string());
                                 send(
-                                    &mut stream,
+                                    writer,
                                     &Message::PairResult { ok: true, reason: None, token: Some(token), attempts_left: None },
                                 )
                                 .await?;
@@ -305,7 +331,7 @@ async fn run_server_session(
                             }
                             PairVerdict::Wrong { attempts_left } => {
                                 send(
-                                    &mut stream,
+                                    writer,
                                     &Message::PairResult {
                                         ok: false,
                                         reason: Some("wrong pairing code".into()),
@@ -318,7 +344,7 @@ async fn run_server_session(
                             }
                             PairVerdict::Expired => {
                                 send(
-                                    &mut stream,
+                                    writer,
                                     &Message::PairResult {
                                         ok: false,
                                         reason: Some("pairing code expired — ask the server for a new code".into()),
@@ -330,7 +356,7 @@ async fn run_server_session(
                             }
                             PairVerdict::Exhausted => {
                                 send(
-                                    &mut stream,
+                                    writer,
                                     &Message::PairResult {
                                         ok: false,
                                         reason: Some("too many attempts — ask the server to generate a new code".into()),
@@ -355,7 +381,7 @@ async fn run_server_session(
     let (tx, rx) = mpsc::unbounded_channel();
     if !engine.register_session(Mode::Server, &hello.device_id, tx) {
         let _ = send(
-            &mut stream,
+            writer,
             &Message::Bye {
                 reason: "busy".into(),
             },
@@ -377,7 +403,7 @@ async fn run_server_session(
     engine.notice("connected", &format!("{} is connected", hello.name));
     engine.on_session_ready(Mode::Server);
 
-    let result = pump(engine.clone(), &mut stream, rx, cancel, Mode::Server).await;
+    let result = pump(engine.clone(), reader, writer, rx, cancel, Mode::Server).await;
     drop(guard);
     engine.on_server_session_ended();
     result.map(|_| ())
@@ -445,7 +471,7 @@ async fn run_client_session(
     cancel: CancellationToken,
 ) -> Result<SessionOutcome> {
     let connector = transport::tls_connector();
-    let mut stream =
+    let stream =
         transport::connect_tls(&connector, &target.host, target.port, HANDSHAKE_TIMEOUT)
             .await
             .with_context(|| format!("connecting to {}:{}", target.host, target.port))?;
@@ -466,13 +492,45 @@ async fn run_client_session(
         }
     }
 
+    // Split the stream before the handshake: reads must not lose bytes when
+    // a select branch (heartbeat, outbound message) wins a race mid-frame.
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut reader = FrameReader::new(read_half);
+    let mut writer = write_half;
+
+    let result = client_session_with(
+        engine.clone(),
+        &mut reader,
+        &mut writer,
+        target,
+        presented,
+        cancel,
+    )
+    .await;
+    // Handshake-level failures never reach the pump: tell the server why we
+    // are dropping instead of leaving it with an unexplained EOF.
+    if let Err(err) = &result {
+        let _ = send(&mut writer, &Message::Bye { reason: format!("{err:#}") }).await;
+    }
+    let _ = writer.shutdown().await;
+    result
+}
+
+async fn client_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    engine: Arc<Engine>,
+    reader: &mut FrameReader<R>,
+    writer: &mut W,
+    target: &ClientTarget,
+    presented: Option<String>,
+    cancel: CancellationToken,
+) -> Result<SessionOutcome> {
     engine.set_state(ConnState::Handshake);
 
     // ---- Protocol handshake -------------------------------------------
     let cfg = engine.cfg.lock().clone();
     let local_screen = *engine.local_screen.lock();
     send(
-        &mut stream,
+        writer,
         &Message::Hello(Hello {
             protocol: PROTOCOL_VERSION,
             device_id: cfg.device_id.clone(),
@@ -484,7 +542,7 @@ async fn run_client_session(
     )
     .await?;
 
-    let ack = match read_message_timeout(&mut stream, HANDSHAKE_TIMEOUT).await? {
+    let ack = match read_message_timeout(reader, HANDSHAKE_TIMEOUT).await? {
         Message::HelloAck(ack) => ack,
         Message::Bye { reason } => return Ok(SessionOutcome::Closed(Some(reason))),
         other => return Err(anyhow!("expected HelloAck, got {}", other.name())),
@@ -526,14 +584,14 @@ async fn run_client_session(
     let mut token_used = target.token.clone();
     if let Some(token) = &token_used {
         send(
-            &mut stream,
+            writer,
             &Message::Authenticate {
                 device_id: cfg.device_id.clone(),
                 token: token.clone(),
             },
         )
         .await?;
-        match read_message_timeout(&mut stream, HANDSHAKE_TIMEOUT).await? {
+        match read_message_timeout(reader, HANDSHAKE_TIMEOUT).await? {
             Message::AuthResult { ok: true, .. } => {
                 authenticated = true;
                 tracing::info!("authenticated with stored token");
@@ -550,7 +608,9 @@ async fn run_client_session(
 
     // ---- Pairing if needed ---------------------------------------------
     if !authenticated {
-        let token = client_pairing_flow(&engine, &mut stream, target, &cancel).await?;
+        let token =
+            client_pairing_flow(&engine, reader, writer, target, &cancel)
+                .await?;
         token_used = Some(token);
     }
 
@@ -576,7 +636,7 @@ async fn run_client_session(
     engine.notice("connected", &format!("connected to {}", ack.name));
     engine.on_session_ready(Mode::Client);
 
-    let result = pump(engine.clone(), &mut stream, rx, cancel, Mode::Client).await;
+    let result = pump(engine.clone(), reader, writer, rx, cancel, Mode::Client).await;
     drop(guard);
     engine.on_client_session_ended();
     result
@@ -587,9 +647,10 @@ async fn run_client_session(
 /// The code arrives either with [`ClientTarget`] (QR scan / link) or through
 /// [`Engine::pending_pair_code`] (typed in the UI). The mailbox is polled at
 /// most every 250 ms, so the flow cannot miss a code regardless of timing.
-async fn client_pairing_flow(
+async fn client_pairing_flow<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     engine: &Arc<Engine>,
-    stream: &mut Stream,
+    reader: &mut FrameReader<R>,
+    writer: &mut W,
     target: &ClientTarget,
     cancel: &CancellationToken,
 ) -> Result<String> {
@@ -610,7 +671,7 @@ async fn client_pairing_flow(
         }
         if let Some(code) = pending_code.take() {
             send(
-                stream,
+                writer,
                 &Message::PairRequest {
                     device_id: cfg.device_id.clone(),
                     name: cfg.device_name.clone(),
@@ -631,7 +692,7 @@ async fn client_pairing_flow(
             _ = tokio::time::sleep_until(deadline) => {
                 return Err(anyhow!("pairing timed out — regenerate the code and try again"));
             }
-            msg = read_message(stream) => {
+            msg = read_message(reader) => {
                 match msg? {
                     Message::PairResult { ok, reason, token, attempts_left } => {
                         if ok {
@@ -674,13 +735,63 @@ async fn client_pairing_flow(
 // Shared pump
 // =========================================================================
 
-async fn pump(
+async fn pump<R, W>(
     engine: Arc<Engine>,
-    stream: &mut Stream,
+    reader: &mut FrameReader<R>,
+    writer: &mut W,
     mut rx: mpsc::UnboundedReceiver<Message>,
     cancel: CancellationToken,
     role: Mode,
-) -> Result<SessionOutcome> {
+) -> Result<SessionOutcome>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    // Session messages (input, clipboard, focus) are applied on an ordered
+    // side task. The pump loop must never block on a handler: a stalled loop
+    // stops heartbeats, and the peer kills a silent connection after
+    // DEAD_AFTER — which used to reset focus and snap the cursor back.
+    let (handler_tx, mut handler_rx) = mpsc::unbounded_channel::<Message>();
+    let handler_engine = engine.clone();
+    let handler = tokio::spawn(async move {
+        while let Some(msg) = handler_rx.recv().await {
+            if let Err(err) = on_session_message(&handler_engine, role, msg).await {
+                tracing::warn!("failed to apply a session message: {err:#}");
+            }
+        }
+    });
+
+    let result = pump_loop(&engine, reader, writer, &mut rx, &cancel, &handler_tx).await;
+    drop(handler_tx);
+    handler.abort();
+
+    // Polite close: explain ourselves and shut TLS down cleanly so the peer
+    // logs a reason instead of "peer closed connection without sending TLS
+    // close_notify", which made every teardown look like a crash.
+    let bye_reason = match &result {
+        Ok(SessionOutcome::Cancelled) => Some("shutting down".to_string()),
+        Ok(SessionOutcome::Closed(_)) => None, // the peer already explained itself
+        Err(err) => Some(format!("{err:#}")),
+    };
+    if let Some(reason) = bye_reason {
+        let _ = send(writer, &Message::Bye { reason }).await;
+    }
+    let _ = writer.shutdown().await;
+    result
+}
+
+async fn pump_loop<R, W>(
+    engine: &Arc<Engine>,
+    reader: &mut FrameReader<R>,
+    writer: &mut W,
+    rx: &mut mpsc::UnboundedReceiver<Message>,
+    cancel: &CancellationToken,
+    handler_tx: &mpsc::UnboundedSender<Message>,
+) -> Result<SessionOutcome>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut seq: u64 = 0;
@@ -692,10 +803,12 @@ async fn pump(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                let _ = send(stream, &Message::Bye { reason: "shutting down".into() }).await;
                 return Ok(SessionOutcome::Cancelled);
             }
-            frame = framing::read_frame(stream) => {
+            // FrameReader keeps partial reads in the reader, so this branch
+            // can be dropped mid-frame by a heartbeat or an outbound message
+            // winning the race without losing a single byte.
+            frame = reader.read_frame() => {
                 let payload = match frame {
                     Ok(Some(payload)) => payload,
                     Ok(None) => return Ok(SessionOutcome::Closed(None)),
@@ -706,7 +819,7 @@ async fn pump(
                 let msg = protocol::decode(&payload)?;
                 match msg {
                     Message::Heartbeat { seq } => {
-                        send(stream, &Message::Pong { seq }).await?;
+                        send(writer, &Message::Pong { seq }).await?;
                     }
                     Message::Pong { seq } => {
                         if let Some(index) = pending_pongs.iter().position(|(s, _)| *s == seq) {
@@ -720,7 +833,9 @@ async fn pump(
                         return Ok(SessionOutcome::Closed(Some(reason)));
                     }
                     other => {
-                        on_session_message(&engine, role, other).await?;
+                        if handler_tx.send(other).is_err() {
+                            return Err(anyhow!("session message handler stopped unexpectedly"));
+                        }
                     }
                 }
             }
@@ -728,9 +843,7 @@ async fn pump(
                 let Some(msg) = msg else {
                     return Ok(SessionOutcome::Cancelled);
                 };
-                let payload = protocol::encode(&msg)?;
-                framing::write_frame(stream, &payload).await?;
-                engine.counters.tx_bytes.fetch_add(payload.len() as u64 + 4, std::sync::atomic::Ordering::Relaxed);
+                engine.counters.tx_bytes.fetch_add(write_outbound(writer, &msg).await?, std::sync::atomic::Ordering::Relaxed);
             }
             _ = heartbeat.tick() => {
                 if first_tick {
@@ -741,9 +854,10 @@ async fn pump(
                     return Err(anyhow!("connection lost (no data for {}s)", DEAD_AFTER.as_secs()));
                 }
                 seq += 1;
-                let payload = protocol::encode(&Message::Heartbeat { seq })?;
-                framing::write_frame(stream, &payload).await?;
-                engine.counters.tx_bytes.fetch_add(payload.len() as u64 + 4, std::sync::atomic::Ordering::Relaxed);
+                engine.counters.tx_bytes.fetch_add(
+                    write_outbound(writer, &Message::Heartbeat { seq }).await?,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 pending_pongs.push_back((seq, std::time::Instant::now()));
                 while pending_pongs.len() > 8 {
                     pending_pongs.pop_front();
@@ -779,23 +893,60 @@ async fn on_session_message(engine: &Arc<Engine>, role: Mode, msg: Message) -> R
 // Helpers
 // =========================================================================
 
-async fn read_message(stream: &mut Stream) -> Result<Message> {
-    match framing::read_frame(stream).await? {
+async fn read_message<R: AsyncRead + Unpin>(reader: &mut FrameReader<R>) -> Result<Message> {
+    match reader.read_frame().await? {
         Some(payload) => Ok(protocol::decode(&payload)?),
         None => Err(anyhow!("connection closed by peer")),
     }
 }
 
-async fn read_message_timeout(stream: &mut Stream, timeout: Duration) -> Result<Message> {
-    tokio::time::timeout(timeout, read_message(stream))
+async fn read_message_timeout<R: AsyncRead + Unpin>(
+    reader: &mut FrameReader<R>,
+    timeout: Duration,
+) -> Result<Message> {
+    tokio::time::timeout(timeout, read_message(reader))
         .await
         .context("timed out waiting for message")?
 }
 
-async fn send(stream: &mut Stream, msg: &Message) -> Result<()> {
+async fn send<W: AsyncWrite + Unpin>(writer: &mut W, msg: &Message) -> Result<()> {
     let payload = protocol::encode(msg)?;
-    framing::write_frame(stream, &payload).await?;
+    framing::write_frame(writer, &payload).await?;
     Ok(())
+}
+
+/// Encode and write one outbound session message; returns the bytes pushed
+/// to the wire (0 when the message was skipped).
+///
+/// An oversized message is dropped with a warning instead of failing the
+/// write: losing one clipboard blob must never take the whole session down.
+async fn write_outbound<W: AsyncWrite + Unpin>(writer: &mut W, msg: &Message) -> Result<u64> {
+    // The only message that can grow without bound: encoding runs under a
+    // MAX_FRAME_BYTES limit, so decide on the text length first — encoding a
+    // rejected payload would otherwise fail the whole session (bincode adds
+    // at most ~12 bytes of overhead for this variant).
+    if let Message::Clipboard { text } = msg {
+        if text.len() + 64 > protocol::MAX_FRAME_BYTES {
+            tracing::warn!(
+                bytes = text.len() + 64,
+                max = protocol::MAX_FRAME_BYTES,
+                "outbound clipboard too large — dropped, session kept alive"
+            );
+            return Ok(0);
+        }
+    }
+    let payload = protocol::encode(msg)?;
+    if payload.len() > protocol::MAX_FRAME_BYTES {
+        tracing::warn!(
+            name = msg.name(),
+            bytes = payload.len(),
+            max = protocol::MAX_FRAME_BYTES,
+            "outbound message too large — dropped, session kept alive"
+        );
+        return Ok(0);
+    }
+    framing::write_frame(writer, &payload).await?;
+    Ok(payload.len() as u64 + 4)
 }
 
 /// Ensures the session slot is released however the session task exits.
@@ -812,5 +963,40 @@ impl SessionGuard {
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         self.engine.deregister_session();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    /// An oversized outbound message must be skipped (with a warning) rather
+    /// than written as a partial frame or allowed to kill the session — the
+    /// stream has to stay framed for every message after it.
+    #[tokio::test]
+    async fn oversized_outbound_is_skipped_and_stream_stays_framed() {
+        let (mut a, b) = duplex(1024);
+        let mut reader = FrameReader::new(b);
+
+        let huge = Message::Clipboard {
+            text: "x".repeat(protocol::MAX_FRAME_BYTES + 64),
+        };
+        let written = write_outbound(&mut a, &huge).await.unwrap();
+        assert_eq!(written, 0, "oversized message must not hit the wire");
+
+        // A normal message afterwards must still frame cleanly.
+        write_outbound(&mut a, &Message::Heartbeat { seq: 7 })
+            .await
+            .unwrap();
+        let frame = reader
+            .read_frame()
+            .await
+            .unwrap()
+            .expect("the session stream must still be aligned");
+        match protocol::decode(&frame).unwrap() {
+            Message::Heartbeat { seq } => assert_eq!(seq, 7),
+            other => panic!("unexpected message {}", other.name()),
+        }
     }
 }

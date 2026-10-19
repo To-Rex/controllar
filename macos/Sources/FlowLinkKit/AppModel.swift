@@ -56,8 +56,33 @@ public final class AppModel: ObservableObject {
         permissions.objectWillChange
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
+                // Permissions may have just been granted: retry the tap on the
+                // next runloop turn (values are updated by then) and tell the
+                // core whether local capture is actually live.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if !self.tapRunning, self.permissions.allGranted, let tap = self.tap {
+                        self.tapRunning = tap.start()
+                    }
+                    self.bridge.setInputCapture(
+                        active: self.tapRunning,
+                        reason: self.tapRunning ? nil : self.captureInactiveReason()
+                    )
+                }
             }
             .store(in: &cancellables)
+    }
+
+    /// Human-readable reason shown (and logged by the core) while the macOS
+    /// event tap is not capturing this computer's input.
+    private func captureInactiveReason() -> String {
+        if !permissions.accessibility {
+            return "Accessibility permission is missing — FlowLink cannot capture this Mac's keyboard and mouse. System Settings → Privacy & Security → Accessibility → FlowLink: toggle it off and on again after every update."
+        }
+        if !permissions.inputMonitoring {
+            return "Input Monitoring permission is missing — System Settings → Privacy & Security → Input Monitoring → FlowLink: toggle it off and on again after every update."
+        }
+        return "the macOS event tap could not be created — re-grant Accessibility to FlowLink, then quit and reopen the app."
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -87,6 +112,10 @@ public final class AppModel: ObservableObject {
         }
         self.tap = tap
         tapRunning = tap.start()
+        bridge.setInputCapture(
+            active: tapRunning,
+            reason: tapRunning ? nil : captureInactiveReason()
+        )
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -142,6 +171,10 @@ public final class AppModel: ObservableObject {
         if !tapRunning, permissions.allGranted, let tap {
             tapRunning = tap.start()
         }
+        bridge.setInputCapture(
+            active: tapRunning,
+            reason: tapRunning ? nil : captureInactiveReason()
+        )
 
         // The physical cursor is hidden while this side's input is forwarded
         // to the other computer; it reappears when focus comes back.

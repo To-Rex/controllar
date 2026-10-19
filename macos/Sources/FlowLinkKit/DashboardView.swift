@@ -267,6 +267,9 @@ public struct DashboardView: View {
         VStack(alignment: .leading, spacing: 16) {
             if let peer = model.status?.peer, model.status?.isConnected == true {
                 peerCard(peer)
+                if !model.permissions.allGranted {
+                    permissionWarningBanner
+                }
                 HStack(alignment: .top, spacing: 16) {
                     metricsCard
                     clientHintCard
@@ -494,8 +497,34 @@ public struct DashboardView: View {
         .card()
     }
 
-    private func errorCard(_ error: String) -> some View {
+    private var permissionWarningBanner: some View {
         HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .foregroundStyle(DS.warn)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Permissions missing")
+                    .font(.system(.callout, weight: .semibold))
+                Text("macOS is blocking FlowLink: remote keyboard and mouse input will not reach this Mac until Accessibility and Input Monitoring are granted in System Settings → Privacy & Security.")
+                    .font(.system(.caption))
+                    .foregroundStyle(DS.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Grant now") {
+                model.permissions.requestAccessibility()
+                model.permissions.requestInputMonitoring()
+            }
+            .buttonStyle(SecondaryButtonStyle())
+        }
+        .padding(12)
+        .background(DS.warnSoft, in: RoundedRectangle(cornerRadius: DS.radiusSmall, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.radiusSmall, style: .continuous)
+                .stroke(DS.warn.opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    private func errorCard(_ error: String) -> some View {        HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(DS.err)
             VStack(alignment: .leading, spacing: 4) {

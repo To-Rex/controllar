@@ -27,6 +27,15 @@ mod tray;
 mod tray;
 
 fn main() {
+    // Panics must be visible: a Windows GUI app has no console, so a panic
+    // inside a runtime task would otherwise vanish (and take a live session
+    // with it). Log through tracing, keep the default hook's behavior.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        default_hook(info);
+    }));
+
     if let Err(err) = app::run() {
         eprintln!("flowlink-win: fatal: {err:#}");
         std::process::exit(1);

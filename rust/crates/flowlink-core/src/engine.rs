@@ -950,17 +950,22 @@ impl Engine {
         self.counters.events_in.fetch_add(1, Ordering::Relaxed);
         match event {
             InputEvent::Enter { edge, .. } => {
+                tracing::info!(
+                    edge = edge.as_str(),
+                    "remote control received — this computer is being driven"
+                );
                 self.set_remote_active(true, Some(edge));
                 self.host.on_input(&event);
             }
             InputEvent::ReleaseAll => {
+                tracing::info!("the server released remote control");
                 self.host.on_input(&event);
             }
             _ => {
                 if self.status.lock().remote_active {
                     self.host.on_input(&event);
                 } else {
-                    tracing::trace!("dropping stale input event");
+                    tracing::debug!("dropping stale input event");
                 }
             }
         }

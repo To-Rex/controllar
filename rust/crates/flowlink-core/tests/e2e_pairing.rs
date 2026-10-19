@@ -277,9 +277,10 @@ async fn two_engines_pair_and_exchange_input() {
         .await;
 
         // ---- Symmetric focus: the client hands the cursor back -------------
-        // Deliberately not changing the client's configured edge here: the
-        // return edge is derived from the edge the cursor entered through, so
-        // mismatched per-machine settings must not break the trip back.
+        // The exit edge is each machine's *configured* edge, every time (the
+        // self-aligning edge was removed: it flipped the return trip against
+        // the user's physical layout after a transition or reconnect).
+        client.execute(Cmd::SetEdge(Edge::Left));
         client.execute(Cmd::ToggleControl);
         wait_until(
             "server owns the cursor again",
@@ -291,10 +292,10 @@ async fn two_engines_pair_and_exchange_input() {
             client_host.forwarding()
         })
         .await;
-        // The server is told to appear on the mirror of the edge the cursor
-        // actually left through (the client's left edge → server's Enter{Left}).
+        // The client leaves through its configured (left) edge → the server
+        // receives Enter{Left}.
         wait_until(
-            "server received a mirrored Enter",
+            "server received the client's Enter",
             Duration::from_secs(5),
             || {
                 server_host.inputs().iter().any(|event| {
@@ -447,4 +448,97 @@ async fn wrong_pairing_code_is_rejected() {
     })
     .await;
     result.expect("reject scenario timed out");
+}
+
+/// The shared cursor must round-trip repeatedly in both directions: the exit
+/// edge is each machine's *configured* edge, every time — it must never flip
+/// or get stuck after a transition (the bug that made one direction stop
+/// working after the other direction had been used).
+#[tokio::test(flavor = "multi_thread")]
+async fn cursor_round_trips_repeatedly() {
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        let server_host = Arc::new(RecordingHost::default());
+        let (server, _server_dir) = spawn_engine(server_host.clone());
+        let port = free_port();
+        server.execute(Cmd::SetListenPort(port));
+        server.execute(Cmd::Start);
+
+        wait_until("server listening", Duration::from_secs(10), || {
+            server_host.state() == "listening"
+        })
+        .await;
+
+        let code = {
+            let status: Value = serde_json::from_str(&server.status_json()).expect("status json");
+            status["pairing"]["code"].as_str().unwrap().to_string()
+        };
+
+        let client_host = Arc::new(RecordingHost::default());
+        let (client, _client_dir) = spawn_engine(client_host.clone());
+        client.execute(Cmd::Connect {
+            host: "127.0.0.1".to_string(),
+            port,
+            code: Some(code),
+            fingerprint: None,
+        });
+        wait_until("both connected", Duration::from_secs(15), || {
+            server_host.state() == "connected" && client_host.state() == "connected"
+        })
+        .await;
+
+        wait_until("server starts focused", Duration::from_secs(5), || {
+            server_host.focused()
+        })
+        .await;
+
+        // Server exits to the right, client exits to the left (consistent
+        // mirrored configs, like two adjacent screens).
+        server.execute(Cmd::SetEdge(Edge::Right));
+        client.execute(Cmd::SetEdge(Edge::Left));
+
+        for round in 0..3 {
+            // 1. Server pushes the cursor out through its right edge.
+            server.execute(Cmd::HostInput(HostInput::MouseMove {
+                x_px: 1700.0,
+                y_px: 540.0,
+                dx: -10.0,
+                dy: 0.0,
+            }));
+            server.execute(Cmd::HostInput(HostInput::MouseMove {
+                x_px: 1920.0,
+                y_px: 540.0,
+                dx: 20.0,
+                dy: 0.0,
+            }));
+            wait_until(
+                &format!("round {round}: client owns the cursor"),
+                Duration::from_secs(5),
+                || client_host.focused(),
+            )
+            .await;
+
+            // 2. The cursor entered near the client's left edge: re-arm by
+            //    moving inward, then push out through the left edge.
+            client.execute(Cmd::HostInput(HostInput::MouseMove {
+                x_px: 200.0,
+                y_px: 540.0,
+                dx: 40.0,
+                dy: 0.0,
+            }));
+            client.execute(Cmd::HostInput(HostInput::MouseMove {
+                x_px: 0.0,
+                y_px: 540.0,
+                dx: -40.0,
+                dy: 0.0,
+            }));
+            wait_until(
+                &format!("round {round}: server owns the cursor again"),
+                Duration::from_secs(5),
+                || server_host.focused(),
+            )
+            .await;
+        }
+    })
+    .await;
+    result.expect("round-trip scenario timed out");
 }

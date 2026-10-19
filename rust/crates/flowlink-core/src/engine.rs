@@ -117,10 +117,6 @@ pub struct Engine {
     pub local_screen: Mutex<ScreenInfo>,
     /// True while this side owns the shared cursor (see [`Status::focused`]).
     pub focused: AtomicBool,
-    /// Local edge the cursor must cross to hand focus to the peer. Derived
-    /// from the last focus transfer (the edge the cursor came in through), so
-    /// mismatched per-machine edge settings cannot break the return trip.
-    pub focus_edge: Mutex<Option<Edge>>,
     /// Client role: a pairing code from the UI, waiting for the session to
     /// consume it (avoids any startup race with the session task).
     pub pending_pair_code: Mutex<Option<String>>,
@@ -186,7 +182,6 @@ impl Engine {
             edge_tracker: Mutex::new(EdgeTracker::new()),
             local_screen: Mutex::new(ScreenInfo::default()),
             focused: AtomicBool::new(false),
-            focus_edge: Mutex::new(None),
             devices: Mutex::new(HashMap::new()),
             session: Mutex::new(None),
             pairing: Mutex::new(None),
@@ -724,12 +719,10 @@ impl Engine {
             // Cursor is here: local input is applied by the OS (the shell
             // passes events through) and only edge crossings matter.
             if let HostInput::MouseMove { x_px, y_px, dx, dy } = ev {
-                // Prefer the edge this focus arrived through (self-aligning
-                // across machines); fall back to the configured edge.
-                let edge = self
-                    .focus_edge
-                    .lock()
-                    .unwrap_or_else(|| self.cfg.lock().edge);
+                // The exit edge is always the configured one, on every
+                // machine and in every direction: predictable, and it never
+                // flips after a reconnect or a transition.
+                let edge = self.cfg.lock().edge;
                 let screen = *self.local_screen.lock();
                 if self
                     .edge_tracker
@@ -875,7 +868,6 @@ impl Engine {
         // Appear at the edge facing the peer: the host mirrors `Enter.edge`,
         // so passing the opposite of our own edge lands on our own edge.
         let edge = self.cfg.lock().edge;
-        *self.focus_edge.lock() = Some(edge);
         self.host.on_input(&InputEvent::Enter {
             edge: edge.opposite(),
             along_norm: 0.5,
@@ -891,13 +883,10 @@ impl Engine {
             return;
         }
         if self.focused.load(Ordering::Relaxed) {
-            // Leave through the edge this focus arrived from (falls back to
-            // the configured edge), so the other side always lands at the
-            // mirror position.
-            let edge = self
-                .focus_edge
-                .lock()
-                .unwrap_or_else(|| self.cfg.lock().edge);
+            // Leave through the configured edge, the same every time. Copy
+            // the edge out first: the guard must not be held across the call
+            // (set_focused → notify re-locks the config mutex).
+            let edge = self.cfg.lock().edge;
             self.give_focus(edge, 0.5);
         } else {
             self.take_focus();
@@ -909,10 +898,6 @@ impl Engine {
         if self.focused.load(Ordering::Relaxed) {
             return;
         }
-        // The cursor appears on the mirrored side; pushing back through that
-        // same local edge returns focus. Deriving it here means the two
-        // machines do not need perfectly mirrored edge settings.
-        *self.focus_edge.lock() = Some(edge.opposite());
         self.set_focused(true);
         tracing::info!(edge = edge.as_str(), "received the cursor from the peer");
     }
@@ -1136,11 +1121,9 @@ impl Engine {
             // tracker may fire immediately (no warp happened). The configured
             // edge is the boundary towards the peer.
             *self.edge_tracker.lock() = EdgeTracker::new();
-            *self.focus_edge.lock() = Some(self.cfg.lock().edge);
         } else {
             // The client starts in the forwarding state without a focus
             // transition, so start the move flusher explicitly.
-            *self.focus_edge.lock() = None;
             self.start_flusher();
             // The cursor was here when the last session ended: take it back
             // immediately so a reconnect never snaps it to the other screen.
@@ -1409,7 +1392,6 @@ impl Engine {
             return;
         }
         self.set_focused(false);
-        *self.focus_edge.lock() = None;
         {
             let mut status = self.status.lock();
             status.state = ConnState::Listening;
@@ -1440,7 +1422,6 @@ impl Engine {
         self.restore_focus
             .store(self.focused.load(Ordering::Relaxed), Ordering::Relaxed);
         self.set_focused(false);
-        *self.focus_edge.lock() = None;
         {
             let mut status = self.status.lock();
             status.peer = None;

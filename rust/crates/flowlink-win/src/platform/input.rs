@@ -203,7 +203,19 @@ fn virtual_origin() -> (i32, i32) {
 /// cursor while this side's input is forwarded to the other computer.
 pub fn update_forwarding(forwarding: bool) {
     if let Some(state) = CAPTURE_STATE.get() {
-        state.write().forwarding = forwarding;
+        let mut state = state.write();
+        if state.forwarding != forwarding {
+            info!(
+                forwarding,
+                "input capture {}",
+                if forwarding {
+                    "forwarded to the other computer"
+                } else {
+                    "local again"
+                }
+            );
+        }
+        state.forwarding = forwarding;
     }
     let mut injection = INJECTION.lock();
     set_cursor_hidden(&mut injection, forwarding);
@@ -581,15 +593,29 @@ pub fn inject(event: &InputEvent) {
     }
 }
 
-/// Place the pointer at the mirrored entry position for `edge`.
+/// Place the pointer at the mirrored entry position for `edge`, a comfortable
+/// distance inside the screen so a sideways twitch cannot immediately hand
+/// focus back.
 fn enter(edge: Edge, along_norm: f32) {
+    const INSET: f64 = 24.0;
     let screen = local_screen();
     let (x, y) = flowlink_core::edge::enter_position(edge, along_norm, screen);
+    let (mut target_x, mut target_y) = (x, y);
+    match edge {
+        // Exited the peer to the right → we appear at the left edge.
+        Edge::Right => target_x += INSET,
+        Edge::Left => target_x -= INSET,
+        // Exited upwards → we appear at the bottom edge.
+        Edge::Top => target_y += INSET,
+        Edge::Bottom => target_y -= INSET,
+    }
+    let target_x = target_x.clamp(0.0, screen.width.max(1.0));
+    let target_y = target_y.clamp(0.0, screen.height.max(1.0));
     let (origin_x, origin_y) = virtual_origin();
     // `SetCursorPos` is relative to the primary monitor; the edge math works
     // in union-screen pixels.
-    let target_x = x.round() as i32 + origin_x;
-    let target_y = y.round() as i32 + origin_y;
+    let target_x = target_x.round() as i32 + origin_x;
+    let target_y = target_y.round() as i32 + origin_y;
     // SAFETY: SetCursorPos has no preconditions beyond a valid point.
     let result = unsafe { SetCursorPos(target_x, target_y) };
     if let Err(err) = result {

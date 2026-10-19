@@ -6,6 +6,12 @@ import Foundation
 ///
 /// All state lives on a private serial queue; `handle(_:)` is safe to call
 /// from any thread (typically the core's runtime).
+/// Marks events produced by the injector so the local event tap can pass them
+/// through without forwarding them back to the peer (input loop protection).
+enum InjectionMarker {
+    static let userData: Int64 = 0x464C_4B31 // "FLK1"
+}
+
 public final class Injector {
 
     private let queue = DispatchQueue(label: "app.flowlink.injector")
@@ -22,6 +28,13 @@ public final class Injector {
     private var metrics = ScreenMetrics.fallback
 
     public init() {}
+
+    /// Tag an event as synthetic and post it.
+    private func post(_ event: CGEvent?) {
+        guard let event else { return }
+        event.setIntegerValueField(.eventSourceUserData, value: InjectionMarker.userData)
+        event.post(tap: .cghidEventTap)
+    }
 
     // MARK: Public API
 
@@ -82,7 +95,7 @@ public final class Injector {
         let along = max(0.0, min(1.0, event.x))
         // Land a few pixels *inside* the edge so ordinary sideways motion is
         // not mistaken for an edge push.
-        let inset = 6.0
+        let inset = 24.0
         let local: CGPoint
         switch serverEdge {
         // The cursor continues in the same direction: it enters through the
@@ -113,7 +126,7 @@ public final class Injector {
             keyDown: down
         )
         cgEvent?.flags = KeyCodes.eventFlags(from: heldModifiers)
-        cgEvent?.post(tap: .cghidEventTap)
+        post(cgEvent)
     }
 
     private func handleMouseMove(_ event: FlInputEvent) {
@@ -136,7 +149,7 @@ public final class Injector {
             mouseCursorPosition: target,
             mouseButton: .left
         )
-        cgEvent?.post(tap: .cghidEventTap)
+        post(cgEvent)
     }
 
     private func handleMouseButton(_ event: FlInputEvent) {
@@ -166,7 +179,7 @@ public final class Injector {
             mouseButton: button
         )
         cgEvent?.flags = KeyCodes.eventFlags(from: heldModifiers)
-        cgEvent?.post(tap: .cghidEventTap)
+        post(cgEvent)
     }
 
     private func handleScroll(_ event: FlInputEvent) {
@@ -184,7 +197,7 @@ public final class Injector {
             wheel2: dx,
             wheel3: 0
         ) else { return }
-        cgEvent.post(tap: .cghidEventTap)
+        post(cgEvent)
     }
 
     private func releaseAll() {
@@ -196,22 +209,22 @@ public final class Injector {
             default: (type, cgButton) = (.otherMouseUp, .center)
             }
             let pos = CGEvent(source: nil)?.location ?? .zero
-            CGEvent(
+            post(CGEvent(
                 mouseEventSource: source,
                 mouseType: type,
                 mouseCursorPosition: pos,
                 mouseButton: cgButton
-            )?.post(tap: .cghidEventTap)
+            ))
         }
         pressedButtons.removeAll()
 
         for usage in pressedKeys {
             if let cgKey = KeyCodes.cgKeyCode(fromHID: usage) {
-                CGEvent(
+                post(CGEvent(
                     keyboardEventSource: source,
                     virtualKey: CGKeyCode(cgKey),
                     keyDown: false
-                )?.post(tap: .cghidEventTap)
+                ))
             }
         }
         pressedKeys.removeAll()
@@ -235,7 +248,7 @@ public final class Injector {
                 keyDown: want
             )
             cgEvent?.flags = KeyCodes.eventFlags(from: heldModifiers)
-            cgEvent?.post(tap: .cghidEventTap)
+            post(cgEvent)
         }
     }
 

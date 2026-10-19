@@ -97,9 +97,12 @@ client avtomatik ulanadi (token orqali, kodsiz).
 - **`Ctrl + Alt + Space`** istalgan klaviaturada kursorni bu yerga/nariga
   o‘tkazadi. Aktiv bo‘lmagan tomonda bossangiz — kursor shu tomonga keladi;
   aktiv tomonda bossangiz — narigi tomonga ketadi.
-- **Chetlarni sozlash:** har bir kompyuterda **Sozlamalar → Cursor edge** —
-  qaysi chekka narigi kompyuterga qaragan bo‘lsa, o‘sha tanlanadi
-  (Windows — o‘ng, Mac — chap kabi). Ikkalasi bir xil chetni tanlamasin.
+- **Chetlarni sozlash:** server (birinchi tinglovchi) kompyuterda **narigi
+  kompyuterga qaragan chetni** tanlash yetarli — kursor o‘sha chetdan chiqib
+  narigi ekranga o‘tadi. **Qaytish cheti avtomatik:** kursor qaysi chetdan
+  kirgan bo‘lsa, o‘sha chetdan orqaga chiqadi (ikki tomonda chetlarni bir
+  xil qilib sozlash shart emas). Kursor chetdan 24 px ichkarida paydo
+  bo‘ladi, shuning uchun tasodifiy kichik harakat fokusni qaytarmaydi.
 - **Clipboard**: matn ikki tomonga avtomatik sinxronlanadi (1 MB gacha).
   Parol menejerlarining “concealed” nusxalari **hech qachon** uzatilmaydi.
 - **Fon rejimi**: oynani yopsangiz ham dastur menu bar/tray’da ishlashda davom

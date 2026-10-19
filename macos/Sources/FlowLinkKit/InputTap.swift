@@ -126,9 +126,10 @@ public final class InputTap {
         // — that would loop input back to the peer. They are also never
         // swallowed: the app that produced them expects local delivery.
         if type != .tapDisabledByTimeout, type != .tapDisabledByUserInput,
-           event.getIntegerValueField(.eventSourceStateID)
-               != Int64(CGEventSourceStateID.hidSystemState.rawValue)
+           event.getIntegerValueField(.eventSourceUserData) == InjectionMarker.userData
         {
+            // Our own injection: never forward it (that would loop input) and
+            // never swallow it (the focused side needs it).
             return pass
         }
 

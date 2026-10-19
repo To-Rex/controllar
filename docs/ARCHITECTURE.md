@@ -80,13 +80,19 @@ focus transfer:
 
 `HostInput::MouseMove` carries the absolute cursor position (union-screen
 pixels) plus the pixel delta; `EdgeTracker` activates once when the cursor is
-on the configured edge and pushing outward (`REARM_MARGIN_PX = 3.0`,
+on the configured edge and pushing outward (`REARM_MARGIN_PX = 10.0`,
 `PUSH_EPSILON_PX = 0.4`), sending `InputEvent::Enter { edge, along_norm }` and
-starting to forward. While forwarding, moves go through the coalescer (flush
-at most every 4 ms; an 8 ms flusher covers the tail) and all other events are
-forwarded directly. Any focus switch sends `InputEvent::ReleaseAll` locally so
-no key or button stays held. The shell hides the physical cursor while
-forwarding and passes events through while focused.
+starting to forward. The edge used while focused is the one the cursor
+arrived through (`focus_edge = Enter.edge.opposite()`), falling back to the
+configured edge, so mismatched per-machine settings cannot cause instant
+returns; the shell places the pointer 24 px inside the edge so a sideways
+twitch is not a deliberate push. While forwarding, moves go through the
+coalescer (flush at most every 4 ms; an 8 ms flusher covers the tail) and all
+other events are forwarded directly. Any focus switch sends
+`InputEvent::ReleaseAll` locally so no key or button stays held. The shell
+hides the physical cursor while forwarding and passes events through while
+focused; injected events carry a marker (`eventSourceUserData`) so the tap
+never forwards them back.
 
 Because `Input` flows both ways, the keyboard on either desk types into the
 focused screen and either mouse moves the shared cursor — the "one body"

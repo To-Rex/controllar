@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "flowlink-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "flowlink-ffi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flowlink-core",
  "serde_json",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "flowlink-win"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arboard",

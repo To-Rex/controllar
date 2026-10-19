@@ -27,8 +27,10 @@ rough edge — not a bug to be filed anonymously.
   shared cursor lives on one screen at a time and both physical keyboards /
   mice are routed to it. While the cursor is on the other computer this
   Mac's input is captured (and its cursor hidden); when the cursor comes
-  back, everything is local again. Both machines need an edge configured
-  towards each other (e.g. Mac left, Windows right).
+  back, everything is local again. Only the side that starts as the server
+  needs an edge pointing at the peer: the return edge follows the edge the
+  cursor actually entered through, so mismatched per-machine settings do
+  not break the trip back.
 
 ## Windows
 

@@ -8,7 +8,7 @@
 use crate::types::{Edge, ScreenInfo};
 
 /// How far (px) the cursor must be inside the screen before the edge re-arms.
-const REARM_MARGIN_PX: f64 = 3.0;
+const REARM_MARGIN_PX: f64 = 10.0;
 
 /// Minimum outward push (px) to count as "still pushing".
 const PUSH_EPSILON_PX: f64 = 0.4;

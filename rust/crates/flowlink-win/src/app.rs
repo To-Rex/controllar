@@ -284,21 +284,19 @@ impl AppShared {
     /// Store a status snapshot and propagate the parts the platform threads
     /// need (forwarding state, clipboard, hotkey).
     fn apply_status(&self, status: StatusMirror) {
+        let forwarding = status.forwarding;
         {
             let mut capture = self.capture.write();
-            capture.forwarding = status.forwarding;
+            capture.forwarding = forwarding;
             capture.clipboard_enabled = status.clipboard_enabled;
             capture.remote_edge = status.remote_edge;
             capture.hotkey_mods = status.hotkey.modifiers;
             capture.hotkey_usage = status.hotkey.usage;
         }
-        let was_forwarding = self.status.read().forwarding;
-        let now_forwarding = status.forwarding;
         *self.status.write() = status;
-        if was_forwarding != now_forwarding {
-            // Cursor visibility follows forwarding in both roles.
-            input::update_forwarding(now_forwarding);
-        }
+        // Idempotent: keeps the hook and the cursor in sync with every status,
+        // even if a previous update was missed.
+        input::update_forwarding(forwarding);
     }
 }
 

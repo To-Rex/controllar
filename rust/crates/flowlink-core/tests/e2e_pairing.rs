@@ -264,7 +264,9 @@ async fn two_engines_pair_and_exchange_input() {
         .await;
 
         // ---- Symmetric focus: the client hands the cursor back -------------
-        client.execute(Cmd::SetEdge(Edge::Left));
+        // Deliberately not changing the client's configured edge here: the
+        // return edge is derived from the edge the cursor entered through, so
+        // mismatched per-machine settings must not break the trip back.
         client.execute(Cmd::ToggleControl);
         wait_until(
             "server owns the cursor again",
@@ -275,6 +277,24 @@ async fn two_engines_pair_and_exchange_input() {
         wait_until("client forwards again", Duration::from_secs(5), || {
             client_host.forwarding()
         })
+        .await;
+        // The server is told to appear on the mirror of the edge the cursor
+        // actually left through (the client's left edge → server's Enter{Left}).
+        wait_until(
+            "server received a mirrored Enter",
+            Duration::from_secs(5),
+            || {
+                server_host.inputs().iter().any(|event| {
+                    matches!(
+                        event,
+                        InputEvent::Enter {
+                            edge: Edge::Left,
+                            ..
+                        }
+                    )
+                })
+            },
+        )
         .await;
 
         // One keyboard on either desk types into the focused screen: the

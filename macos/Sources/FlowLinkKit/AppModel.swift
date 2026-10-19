@@ -42,6 +42,9 @@ public final class AppModel: ObservableObject {
         proxy.onInput = { [weak self] event in
             self?.injector.handle(event)
         }
+        injector.onEdgeReturn = { [weak self] edge, along in
+            self?.bridge.handOff(edge: edge, along: along)
+        }
         proxy.onClipboard = { [weak self] text in
             DispatchQueue.main.async { self?.clipboard.applyFromPeer(text) }
         }
@@ -60,7 +63,15 @@ public final class AppModel: ObservableObject {
                 // next runloop turn (values are updated by then) and tell the
                 // core whether local capture is actually live.
                 DispatchQueue.main.async { [weak self] in
-                    self?.installTap()
+                    guard let self else { return }
+                    // A revoked grant takes the running tap down with it. Drop
+                    // the old tap and report/recreate instead of silently
+                    // hammering input into a dead CFMachPort.
+                    if self.tapRunning && !self.permissions.allGranted {
+                        self.tap?.stop()
+                        self.tapRunning = false
+                    }
+                    self.installTap()
                 }
             }
             .store(in: &cancellables)
@@ -79,6 +90,32 @@ public final class AppModel: ObservableObject {
     }
 
     private var tapRetryScheduled = false
+    /// Pending "capture is down" report. Right after launch (and right after
+    /// an update) permissions/code-signature checks settle a moment late; a
+    /// one-second grace avoids a scary banner that disappears immediately.
+    private var captureReportWork: DispatchWorkItem?
+
+    /// Report capture state to the core, debouncing the inactive case.
+    private func reportCapture(active: Bool, reason: String?) {
+        if active {
+            captureReportWork?.cancel()
+            captureReportWork = nil
+            bridge.setInputCapture(active: true, reason: nil)
+            return
+        }
+        // Status snapshots arrive several times per second; rescheduling on
+        // each one would postpone the report forever.
+        guard captureReportWork == nil else { return }
+        let reason = reason ?? "local input capture is not active"
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.captureReportWork = nil
+            guard !self.tapRunning else { return }
+            self.bridge.setInputCapture(active: false, reason: reason)
+        }
+        captureReportWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
 
     /// Install the event tap, retrying once after a short delay. Right after
     /// a relaunch the system may still hold the previous instance's tap slot,
@@ -87,12 +124,12 @@ public final class AppModel: ObservableObject {
     private func installTap() {
         if tapRunning { return }
         guard permissions.allGranted, let tap else {
-            bridge.setInputCapture(active: false, reason: captureInactiveReason())
+            reportCapture(active: false, reason: captureInactiveReason())
             return
         }
         tapRunning = tap.start()
         if tapRunning {
-            bridge.setInputCapture(active: true, reason: nil)
+            reportCapture(active: true, reason: nil)
             return
         }
         guard !tapRetryScheduled else { return }
@@ -103,7 +140,7 @@ public final class AppModel: ObservableObject {
             if !self.tapRunning, let tap = self.tap, tap.start() {
                 self.tapRunning = true
             }
-            self.bridge.setInputCapture(
+            self.reportCapture(
                 active: self.tapRunning,
                 reason: self.tapRunning ? nil : self.captureInactiveReason()
             )
@@ -154,6 +191,8 @@ public final class AppModel: ObservableObject {
 
     public func shutdown() {
         clipboard.stop()
+        // Never leave the system cursor hidden after the app goes away.
+        injector.restoreCursorNow()
         tap?.stop()
         permissions.stopMonitoring()
         bridge.stop()
@@ -170,38 +209,39 @@ public final class AppModel: ObservableObject {
     private func handleStatusJSON(_ json: String) {
         guard let data = json.data(using: .utf8) else { return }
         guard let decoded = try? JSONDecoder().decode(FLStatus.self, from: data) else { return }
+
+        // Routing state must reach the tap/injector on *this* thread: waiting
+        // for the main queue can leave the keyboard swallowed on the wrong
+        // computer for a whole frame (or longer under load). Both objects are
+        // lock-protected and safe to update here.
+        tapShared.update { snapshot in
+            snapshot.forwarding = decoded.isConnected && decoded.isForwarding
+            snapshot.hotkeyModifiers = decoded.hotkey.modifiers
+            snapshot.hotkeyUsage = decoded.hotkey.usage
+        }
+        injector.setPeerEdge(decoded.peerEdge)
+        if decoded.isConnected && decoded.isForwarding {
+            injector.hideCursor()
+        } else {
+            injector.showCursor()
+        }
+
         DispatchQueue.main.async { [weak self] in
             self?.apply(decoded)
         }
     }
 
     private func apply(_ new: FLStatus) {
-        let previous = status
         status = new
         if let limit = new.clipboardMaxBytes {
             clipboard.maxBytes = limit
         }
 
-        tapShared.update { snapshot in
-            snapshot.forwarding = new.isForwarding
-            snapshot.hotkeyModifiers = new.hotkey.modifiers
-            snapshot.hotkeyUsage = new.hotkey.usage
-        }
-
-        // Retry installing the tap once permissions are available.
+        // Retry installing the tap once permissions are available. Routing
+        // state is applied by `handleStatusJSON` directly on the callback
+        // thread; re-applying it here would let an *older* snapshot that is
+        // still queued on the main thread overwrite a newer one.
         installTap()
-
-        // The physical cursor is hidden while this side's input is forwarded
-        // to the other computer; it reappears when focus comes back.
-        let wasForwarding = previous?.isForwarding ?? false
-        if new.isConnected && new.isForwarding && !wasForwarding {
-            injector.hideCursor()
-        } else if !new.isForwarding && wasForwarding {
-            injector.showCursor()
-        }
-        if !new.isConnected && wasForwarding {
-            injector.showCursor()
-        }
     }
 
     private func handleNoticeJSON(_ json: String) {

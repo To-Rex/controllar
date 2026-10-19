@@ -189,11 +189,17 @@ public struct DashboardView: View {
                 }
             }
             Divider()
-            Text("Move the cursor across the \(model.status?.edge.title.lowercased() ?? "right") edge to take over the other computer, or press the toggle hotkey.")
+            Text("Move the cursor across the \(effectiveEdge.title.lowercased()) edge to take over the other computer, or press the toggle hotkey.")
                 .font(.system(.caption))
                 .foregroundStyle(DS.textDim)
         }
         .card()
+    }
+
+    /// The edge actually in use: the peer-synced one when a session is live,
+    /// the configured one otherwise.
+    private var effectiveEdge: FLEdge {
+        model.status?.peerEdge ?? model.status?.edge ?? .right
     }
 
     private var edgeCard: some View {

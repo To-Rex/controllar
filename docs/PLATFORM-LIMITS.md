@@ -27,10 +27,15 @@ rough edge — not a bug to be filed anonymously.
   shared cursor lives on one screen at a time and both physical keyboards /
   mice are routed to it. While the cursor is on the other computer this
   Mac's input is captured (and its cursor hidden); when the cursor comes
-  back, everything is local again. Only the side that starts as the server
-  needs an edge pointing at the peer: the return edge follows the edge the
-  cursor actually entered through, so mismatched per-machine settings do
-  not break the trip back.
+  back, everything is local again. The peer-facing edge is exchanged
+  automatically (0.3+ on both sides) and any incoming handoff corrects it,
+  so mismatched per-machine settings cannot strand the cursor. Pushing the
+  *injected* cursor (the other computer's mouse) past the facing edge also
+  returns control: the injector detects the clamped overshoot.
+- **Ad-hoc signatures reset permissions.** Every rebuild changes the code
+  signature, so macOS may keep an old FlowLink entry in Accessibility/Input
+  Monitoring that no longer applies. Toggle the entry off and on after each
+  update (the app banners when capture is down).
 
 ## Windows
 
@@ -53,12 +58,24 @@ rough edge — not a bug to be filed anonymously.
   windows of a higher integrity level. Typing into an elevated app (an
   Administrator terminal, an installer's elevation prompt) while FlowLink
   runs unelevated silently does nothing there; run FlowLink elevated if that
-  is required. FlowLink itself does not require elevation for normal use.
+  is required. FlowLink itself does not require elevation for normal use. The
+  shell detects a blocked `SendInput` and shows a one-time notice instead of
+  failing silently.
 - **UAC and the secure desktop are unreachable.** Nothing can be typed into
   a UAC consent dialog from either side.
 - **Injected events are skipped by the hooks.** The low-level keyboard/mouse
   hooks ignore events flagged as injected so FlowLink's own output never
   loops back as input.
+- **Edge handling while forwarding.** Windows clamps the hidden pointer at
+  desktop edges, where position-based `WM_MOUSEMOVE` deltas become zero.
+  FlowLink keeps the pointer inside a 160 px runway (on every move and from a
+  500 ms watchdog), resets the delta baseline on each warp, and the injector
+  detects the overshoot that hands the cursor back. The watchdog also
+  refreshes the virtual-screen geometry every 2 s, so monitor/DPI changes do
+  not leave the edge math in a stale coordinate space.
+- **Hotkey auto-repeat.** The toggle chord fires once per press; Windows'
+  repeated `WM_KEYDOWN` events while a key is held are swallowed until the
+  release.
 - **UI surface is the tray menu and the settings window** (`tray-icon` +
   `egui`, see `rust/Cargo.toml`). FlowLink installs no DWM hooks and draws no
   overlays on the desktop; the settings window is a plain eframe window.

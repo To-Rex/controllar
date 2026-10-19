@@ -20,12 +20,21 @@ public final class Injector {
     /// back to the peer (which would loop input).
     private let source = CGEventSource(stateID: .privateState)
 
+    /// The focused shell's injector saw the synthetic pointer pushed past the
+    /// edge facing the peer (physical mouse is on the other desk). The app
+    /// forwards this to `flowlink_hand_off`.
+    public var onEdgeReturn: ((FLEdge, Double) -> Void)?
+
     // State — queue-only.
     private var pressedKeys = Set<UInt16>()
     private var pressedButtons = Set<UInt8>()
     private var heldModifiers: UInt8 = 0
     private var cursorHidden = false
+    private var hiddenDisplays: [CGDirectDisplayID] = []
     private var metrics = ScreenMetrics.fallback
+
+    /// Injected-edge return state machine (pure, unit-tested).
+    private var edgeTracker = EdgePushTracker()
 
     public init() {}
 
@@ -46,18 +55,29 @@ public final class Injector {
 
     public func hideCursor() {
         queue.async { [weak self] in
-            guard let self, !self.cursorHidden else { return }
-            CGDisplayHideCursor(CGMainDisplayID())
-            self.cursorHidden = true
+            self?.hideCursorLocked()
         }
     }
 
     public func showCursor() {
         queue.async { [weak self] in
-            guard let self, self.cursorHidden else { return }
-            CGDisplayShowCursor(CGMainDisplayID())
-            self.cursorHidden = false
-            self.metrics = ScreenGeometry.unionMetrics()
+            self?.showCursorLocked()
+        }
+    }
+
+    /// Synchronously restore the cursor (app termination: queued work would
+    /// be lost when the process exits).
+    public func restoreCursorNow() {
+        queue.sync { [weak self] in
+            self?.showCursorLocked()
+        }
+    }
+
+    /// Update the local edge facing the peer from the engine status. Needed
+    /// before the first `Enter` (e.g. the server owns the cursor at startup).
+    public func setPeerEdge(_ edge: FLEdge?) {
+        queue.async { [weak self] in
+            self?.edgeTracker.setPeerEdge(edge)
         }
     }
 
@@ -66,6 +86,38 @@ public final class Injector {
         queue.async { [weak self] in
             self?.metrics = ScreenGeometry.unionMetrics()
         }
+    }
+
+    // MARK: Cursor visibility
+
+    /// Hide the system cursor on every active display.
+    ///
+    /// `CGDisplayHideCursor` is per display, so hiding only the main display
+    /// leaves a stray cursor behind when the pointer sits on a second screen.
+    private func hideCursorLocked() {
+        guard !cursorHidden else { return }
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
+            return
+        }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return }
+        let active = Array(ids.prefix(Int(count)))
+        for id in active {
+            CGDisplayHideCursor(id)
+        }
+        hiddenDisplays = active
+        cursorHidden = true
+    }
+
+    private func showCursorLocked() {
+        guard cursorHidden else { return }
+        for id in hiddenDisplays {
+            CGDisplayShowCursor(id)
+        }
+        hiddenDisplays.removeAll()
+        cursorHidden = false
+        metrics = ScreenGeometry.unionMetrics()
     }
 
     // MARK: Queue-confined implementation
@@ -91,7 +143,13 @@ public final class Injector {
 
     private func handleEnter(_ event: FlInputEvent) {
         metrics = ScreenGeometry.unionMetrics()
+        // The cursor is coming here: make sure it is visible again before it
+        // is warped (the status update that follows is asynchronous).
+        showCursorLocked()
+
         let serverEdge = edge(from: event.flags)
+        edgeTracker.enter(remoteEdge: serverEdge)
+
         let along = max(0.0, min(1.0, event.x))
         // Land a few pixels *inside* the edge so ordinary sideways motion is
         // not mistaken for an edge push.
@@ -106,6 +164,9 @@ public final class Injector {
         case .bottom: local = CGPoint(x: along * metrics.width, y: inset)
         }
         CGWarpMouseCursorPosition(metrics.global(local))
+        // Warping can disassociate the hardware pointer from the cursor; put
+        // them back together so the next physical movement moves the cursor.
+        CGAssociateMouseAndMouseCursorPosition(1)
     }
 
     private func handleKey(_ event: FlInputEvent) {
@@ -131,8 +192,12 @@ public final class Injector {
 
     private func handleMouseMove(_ event: FlInputEvent) {
         let current = CGEvent(source: nil)?.location ?? .zero
-        let target = CGPoint(x: current.x + event.x, y: current.y + event.y)
+        // Edge detection must run on the *intended* position: once the cursor
+        // is pinned to a screen edge the next moves are clamped, and that is
+        // exactly the "keep pushing" gesture that hands control back.
+        detectInjectedEdge(from: current, dx: event.x, dy: event.y)
 
+        let target = CGPoint(x: current.x + event.x, y: current.y + event.y)
         let type: CGEventType
         if pressedButtons.contains(1) {
             type = .leftMouseDragged
@@ -231,6 +296,30 @@ public final class Injector {
 
         ensureModifiers(0)
         heldModifiers = 0
+    }
+
+    // MARK: Injected-edge return
+
+    /// Detect a deliberate outward push at the peer-facing edge.
+    ///
+    /// While this Mac owns the cursor the local event tap ignores synthetic
+    /// events (that is what prevents input loops), so an edge reached by the
+    /// *other* computer's mouse is invisible to it. The injector is the only
+    /// component that sees those moves; it reports the push and the core hands
+    /// focus back exactly as if the physical pointer had crossed the edge.
+    private func detectInjectedEdge(from current: CGPoint, dx: Double, dy: Double) {
+        guard metrics.width > 1, metrics.height > 1 else { return }
+        let local = metrics.normalized(current)
+        guard let (edge, along) = edgeTracker.feed(
+            x: local.x,
+            y: local.y,
+            dx: dx,
+            dy: dy,
+            width: metrics.width,
+            height: metrics.height,
+            nowNanos: DispatchTime.now().uptimeNanoseconds
+        ) else { return }
+        onEdgeReturn?(edge, along)
     }
 
     /// Materialize the desired modifier state before injecting a key.

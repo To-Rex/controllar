@@ -62,6 +62,13 @@ pub enum Cmd {
     ForgetDevice(String),
     /// Input captured by the native shell.
     HostInput(HostInput),
+    /// The focused shell saw the *injected* pointer run past the peer-facing
+    /// edge (the mouse physically moving on the other desk). Hand the shared
+    /// cursor back over that edge. `along_norm` is the position along it.
+    HandOff {
+        edge: Edge,
+        along_norm: f32,
+    },
     /// Client asks for control to be returned to the server (edge push or
     /// hotkey on the client).
     RequestControl,
@@ -117,6 +124,18 @@ pub struct Engine {
     pub local_screen: Mutex<ScreenInfo>,
     /// True while this side owns the shared cursor (see [`Status::focused`]).
     pub focused: AtomicBool,
+    /// Local screen edge facing the other computer. Derived from the session
+    /// topology (or from the geometric `Enter` handoff) and used for *every*
+    /// focus transfer: exiting the screen, placing the cursor after a hotkey
+    /// and accepting an injected-edge push. Never let the two machines
+    /// disagree about this edge.
+    pub peer_edge: Mutex<Edge>,
+    /// Serializes status publication so an older snapshot can never overtake a
+    /// newer one on the way to the shell (which would leave the shell hiding
+    /// the wrong cursor and swallowing the wrong keyboard).
+    notify_lock: Mutex<()>,
+    /// True when the connected peer understands `Message::Topology`.
+    peer_topology: AtomicBool,
     /// Client role: a pairing code from the UI, waiting for the session to
     /// consume it (avoids any startup race with the session task).
     pub pending_pair_code: Mutex<Option<String>>,
@@ -172,6 +191,7 @@ impl Engine {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let initial_status = Self::build_initial_status(&cfg, &identity);
+        let initial_peer_edge = cfg.edge;
         let engine = Arc::new(Engine {
             status: Mutex::new(initial_status),
             clipboard_gate: Mutex::new(ClipboardGate::new(
@@ -182,6 +202,9 @@ impl Engine {
             edge_tracker: Mutex::new(EdgeTracker::new()),
             local_screen: Mutex::new(ScreenInfo::default()),
             focused: AtomicBool::new(false),
+            peer_edge: Mutex::new(initial_peer_edge),
+            notify_lock: Mutex::new(()),
+            peer_topology: AtomicBool::new(false),
             devices: Mutex::new(HashMap::new()),
             session: Mutex::new(None),
             pairing: Mutex::new(None),
@@ -240,6 +263,7 @@ impl Engine {
             forwarding: false,
             remote_edge: None,
             edge: cfg.edge,
+            peer_edge: cfg.edge,
             clipboard_enabled: cfg.clipboard_enabled,
             clipboard_max_bytes: cfg.clipboard_max_bytes,
             hotkey: cfg.hotkey,
@@ -293,6 +317,12 @@ impl Engine {
 
     pub fn set_actual_port(&self, port: u16) {
         *self.actual_port.lock() = port;
+        let effective = if port != 0 {
+            port
+        } else {
+            self.cfg.lock().listen_port
+        };
+        self.status.lock().local.port = effective;
     }
 
     /// QR code for the current pairing session (invite link with address,
@@ -462,27 +492,33 @@ impl Engine {
             }
             Cmd::ForgetDevice(id) => {
                 let removed;
+                let paired_devices;
                 {
                     let mut cfg = self.cfg.lock();
                     removed = cfg.forget_paired(&id);
+                    paired_devices = cfg
+                        .paired_devices
+                        .iter()
+                        .map(PairedDevicePublic::from)
+                        .collect::<Vec<_>>();
                     let cfg_snapshot = cfg.clone();
                     drop(cfg);
                     self.save_config(&cfg_snapshot);
                 }
+                // Never hold the config lock while taking the status lock:
+                // `notify()` walks the opposite order and the two together
+                // were a real deadlock (a Forget from the UI could freeze the
+                // whole engine while a session thread was publishing status).
                 if removed {
-                    let cfg = self.cfg.lock();
-                    let mut status = self.status.lock();
-                    status.paired_devices = cfg
-                        .paired_devices
-                        .iter()
-                        .map(PairedDevicePublic::from)
-                        .collect();
-                    drop(cfg);
+                    self.status.lock().paired_devices = paired_devices;
                 }
                 self.notify();
             }
             Cmd::HostInput(ev) => {
                 self.handle_host_input(ev);
+            }
+            Cmd::HandOff { edge, along_norm } => {
+                self.handle_injected_edge(edge, along_norm);
             }
             Cmd::RequestControl => {
                 // "Take the cursor back" from the UI/hotkey on this side.
@@ -506,15 +542,7 @@ impl Engine {
                 self.notify();
             }
             Cmd::SetEdge(edge) => {
-                {
-                    let mut cfg = self.cfg.lock();
-                    cfg.edge = edge;
-                    let cfg_snapshot = cfg.clone();
-                    drop(cfg);
-                    self.save_config(&cfg_snapshot);
-                }
-                self.status.lock().edge = edge;
-                self.notify();
+                self.set_local_edge(edge);
             }
             Cmd::SetClipboardEnabled(enabled) => {
                 {
@@ -595,8 +623,9 @@ impl Engine {
         status.metrics.connected_since_ms = status.peer.as_ref().map(|p| p.since_ms);
         status.metrics.uptime_ms = util::now_ms().saturating_sub(self.started_ms);
         status.listening = self.listening.load(Ordering::Relaxed);
-        status.clipboard_max_bytes = self.cfg.lock().clipboard_max_bytes;
-        status.local.port = self.effective_listen_port();
+        // Deliberately no config lock here: `refresh_metrics` runs while the
+        // status lock is held, and acquiring config inside status is what
+        // allowed an ABBA deadlock with the command loop (see ForgetDevice).
     }
 
     pub fn refresh_devices_status(&self) {
@@ -719,10 +748,12 @@ impl Engine {
             // Cursor is here: local input is applied by the OS (the shell
             // passes events through) and only edge crossings matter.
             if let HostInput::MouseMove { x_px, y_px, dx, dy } = ev {
-                // The exit edge is always the configured one, on every
-                // machine and in every direction: predictable, and it never
-                // flips after a reconnect or a transition.
-                let edge = self.cfg.lock().edge;
+                // The exit edge is the *peer-facing* edge, which is synced
+                // with the other computer (topology) and self-heals from the
+                // edge the cursor actually entered through. It is deliberately
+                // not re-read from the local config on every event: a stale
+                // per-machine setting must never strand the cursor.
+                let edge = self.peer_edge();
                 let screen = *self.local_screen.lock();
                 if self
                     .edge_tracker
@@ -736,7 +767,9 @@ impl Engine {
             return;
         }
 
-        // Cursor is on the peer: capture and forward everything.
+        // Cursor is on the peer: capture and forward everything. Pending
+        // motion is flushed *before* a button/key/scroll event so a click
+        // never lands at a stale position.
         match ev {
             HostInput::MouseMove { dx, dy, .. } => {
                 let now = util::now_ms();
@@ -752,6 +785,7 @@ impl Engine {
                 down,
                 modifiers,
             } => {
+                self.flush_moves_now();
                 self.push_to_peer(Message::Input(InputEvent::Key {
                     usage,
                     down,
@@ -763,6 +797,7 @@ impl Engine {
                 down,
                 modifiers,
             } => {
+                self.flush_moves_now();
                 self.push_to_peer(Message::Input(InputEvent::MouseButton {
                     button,
                     down,
@@ -770,6 +805,7 @@ impl Engine {
                 }));
             }
             HostInput::Scroll { dx, dy, precise } => {
+                self.flush_moves_now();
                 self.push_to_peer(Message::Input(InputEvent::Scroll {
                     dx: dx as f32,
                     dy: dy as f32,
@@ -777,6 +813,46 @@ impl Engine {
                 }));
             }
         }
+    }
+
+    /// Send any accumulated relative motion now (before a discrete event).
+    fn flush_moves_now(&self) {
+        let now = util::now_ms();
+        if let Some((dx, dy)) = self.move_coalescer.lock().flush(now) {
+            if dx != 0.0 || dy != 0.0 {
+                self.push_to_peer(Message::Input(InputEvent::MouseMove { dx, dy }));
+            }
+        }
+    }
+
+    /// The focused shell saw the injected pointer pushed past the edge that
+    /// faces the peer. This is the missing half of edge control: when the
+    /// physical mouse is on the *other* desk, the local event tap never sees
+    /// those moves (they are synthetic), so the shell detects the clamp in its
+    /// injector and asks the engine to hand the shared cursor back.
+    fn handle_injected_edge(self: &Arc<Self>, edge: Edge, along_norm: f32) {
+        if !self.focused.load(Ordering::Relaxed) {
+            tracing::debug!(
+                edge = edge.as_str(),
+                "injected edge push ignored — not focused"
+            );
+            return;
+        }
+        let expected = self.peer_edge();
+        if edge != expected {
+            tracing::debug!(
+                edge = edge.as_str(),
+                expected = expected.as_str(),
+                "injected edge push ignored — not the peer-facing edge"
+            );
+            return;
+        }
+        tracing::info!(
+            edge = edge.as_str(),
+            along = along_norm,
+            "injected pointer crossed the peer edge — handing back"
+        );
+        self.give_focus(edge, along_norm);
     }
 
     /// Rate-limited diagnostic for input that must be dropped (no session or
@@ -847,7 +923,11 @@ impl Engine {
         }
         self.set_focused(false);
         self.notice("focus", "the cursor is now on the other computer");
-        tracing::info!(edge = edge.as_str(), "gave focus to the peer");
+        tracing::info!(
+            edge = edge.as_str(),
+            along = along_norm,
+            "gave focus to the peer"
+        );
     }
 
     /// Take the shared cursor onto this screen (hotkey on the unfocused side).
@@ -857,7 +937,9 @@ impl Engine {
         }
         // The side that currently shows the cursor must stop showing it.
         if !self.push_to_peer(Message::Reclaim) {
-            tracing::warn!("focus reclaim not delivered — no live session, keeping the cursor on the peer");
+            tracing::warn!(
+                "focus reclaim not delivered — no live session, keeping the cursor on the peer"
+            );
             self.notice(
                 "error",
                 "cannot take the cursor — the computers are not connected",
@@ -866,8 +948,8 @@ impl Engine {
         }
         self.set_focused(true);
         // Appear at the edge facing the peer: the host mirrors `Enter.edge`,
-        // so passing the opposite of our own edge lands on our own edge.
-        let edge = self.cfg.lock().edge;
+        // so passing the opposite of our own peer-facing edge lands there.
+        let edge = self.peer_edge();
         self.host.on_input(&InputEvent::Enter {
             edge: edge.opposite(),
             along_norm: 0.5,
@@ -883,20 +965,144 @@ impl Engine {
             return;
         }
         if self.focused.load(Ordering::Relaxed) {
-            // Leave through the configured edge, the same every time. Copy
-            // the edge out first: the guard must not be held across the call
-            // (set_focused → notify re-locks the config mutex).
-            let edge = self.cfg.lock().edge;
+            // Leave through the peer-facing edge. Copy it out first: no lock
+            // may be held across `give_focus` → `set_focused` → `notify`.
+            let edge = self.peer_edge();
             self.give_focus(edge, 0.5);
         } else {
             self.take_focus();
         }
     }
 
+    /// Current session's local edge facing the other computer.
+    pub fn peer_edge(&self) -> Edge {
+        *self.peer_edge.lock()
+    }
+
+    /// Replace the peer-facing edge. Returns true when it actually changed.
+    fn update_peer_edge(&self, edge: Edge) -> bool {
+        let changed = {
+            let mut slot = self.peer_edge.lock();
+            if *slot == edge {
+                false
+            } else {
+                *slot = edge;
+                true
+            }
+        };
+        self.status.lock().peer_edge = edge;
+        changed
+    }
+
+    /// Persist the effective edge so the next session starts in the same
+    /// geometry (without taking the config lock while holding another one).
+    fn persist_edge(&self, edge: Edge) {
+        let snapshot = {
+            let mut cfg = self.cfg.lock();
+            if cfg.edge == edge {
+                return;
+            }
+            cfg.edge = edge;
+            cfg.clone()
+        };
+        self.save_config(&snapshot);
+    }
+
+    /// The user picked an edge in Settings (or the UI flipped sides).
+    ///
+    /// The local edge becomes authoritative for this side immediately; a
+    /// compatible peer is told to mirror it so both machines can never
+    /// disagree about where the cursor must leave the screen.
+    pub fn set_local_edge(self: &Arc<Self>, edge: Edge) {
+        self.persist_edge(edge);
+        let changed = self.update_peer_edge(edge);
+        self.status.lock().edge = edge;
+        if changed {
+            self.edge_tracker.lock().hint_returned();
+            self.move_coalescer.lock().clear();
+        }
+        if self.has_session() && self.peer_supports_topology() {
+            if !self.push_to_peer(Message::Topology { edge }) {
+                tracing::warn!("could not send the new topology to the peer");
+            }
+        }
+        if changed {
+            tracing::info!(edge = edge.as_str(), "local peer-facing edge changed");
+        }
+        self.notify();
+    }
+
+    /// The peer moved the seam. Adopt the mirrored edge locally *and* persist
+    /// it, so the setting survives the next launch/reconnect on both sides.
+    pub fn apply_remote_topology(self: &Arc<Self>, edge: Edge) {
+        let local = edge.opposite();
+        let changed = self.update_peer_edge(local);
+        self.persist_edge(local);
+        self.status.lock().edge = local;
+        if changed {
+            self.edge_tracker.lock().hint_returned();
+            self.move_coalescer.lock().clear();
+            if self.focused.load(Ordering::Relaxed) {
+                // The seam moved under a focused cursor: put it on the new
+                // peer-facing edge instead of stranding it mid-screen.
+                self.host.on_input(&InputEvent::Enter {
+                    edge: local.opposite(),
+                    along_norm: 0.5,
+                });
+            }
+            tracing::info!(
+                peer_edge = local.as_str(),
+                remote_edge = edge.as_str(),
+                "peer moved the shared edge — topology synced"
+            );
+            self.notice(
+                "focus",
+                &format!(
+                    "the other computer moved the shared edge — the cursor now leaves through your {} edge",
+                    local.as_str()
+                ),
+            );
+        }
+        self.notify();
+    }
+
+    /// True when the peer advertised topology support during the handshake.
+    pub fn peer_supports_topology(&self) -> bool {
+        self.peer_topology.load(Ordering::Relaxed)
+    }
+
+    pub fn set_peer_topology_support(&self, supported: bool) {
+        self.peer_topology.store(supported, Ordering::Relaxed);
+    }
+
+    /// Server side: tell a compatible client which edge faces it.
+    pub fn announce_topology(&self) {
+        if !self.has_session() || !self.peer_supports_topology() {
+            return;
+        }
+        let edge = self.peer_edge();
+        if !self.push_to_peer(Message::Topology { edge }) {
+            tracing::warn!("could not announce the session topology");
+        }
+    }
+
     /// The peer pushed its pointer onto this screen (it sent `Enter`).
     pub fn on_focus_granted(self: &Arc<Self>, edge: Edge) {
-        if self.focused.load(Ordering::Relaxed) {
-            return;
+        // The edge the cursor entered through is geometric truth: the local
+        // peer-facing edge is always its mirror. Adopting it makes the return
+        // trip work even when the two machines were configured inconsistently
+        // (or when only one of them was upgraded).
+        let local = edge.opposite();
+        if self.peer_edge() != local {
+            tracing::info!(
+                remote_edge = edge.as_str(),
+                peer_edge = local.as_str(),
+                "Enter edge corrected the peer-facing edge"
+            );
+            self.update_peer_edge(local);
+            self.persist_edge(local);
+            self.status.lock().edge = local;
+            self.edge_tracker.lock().hint_returned();
         }
         self.set_focused(true);
         tracing::info!(edge = edge.as_str(), "received the cursor from the peer");
@@ -905,6 +1111,10 @@ impl Engine {
     /// The peer asked for the cursor back (hotkey pressed on its side).
     pub fn on_reclaim(self: &Arc<Self>) {
         if !self.focused.load(Ordering::Relaxed) {
+            // Already unfocused: keep the state pair consistent anyway (the
+            // requester is now the focused side).
+            tracing::debug!("reclaim received while already unfocused");
+            self.set_focused(false);
             return;
         }
         self.set_focused(false);
@@ -1072,6 +1282,18 @@ impl Engine {
         self.session.lock().is_some()
     }
 
+    /// Device id of the live session, when there is one.
+    ///
+    /// The server uses it to tell a *reconnect of the same computer* (whose
+    /// previous socket may not have timed out yet) from a genuinely different
+    /// client, which must still be refused while busy.
+    pub fn session_device_id(&self) -> Option<String> {
+        self.session
+            .lock()
+            .as_ref()
+            .map(|slot| slot.device_id.clone())
+    }
+
     /// Send a message to the live session (no-op without one).
     pub fn push_to_peer(&self, msg: Message) -> bool {
         let slot = self.session.lock();
@@ -1115,15 +1337,21 @@ impl Engine {
     /// cursor at the start; the client begins by forwarding its input.
     pub fn on_session_ready(self: &Arc<Self>, role: Mode) {
         self.input_seen.store(false, Ordering::Relaxed);
+        // Both sides start from their last-known (persisted) edge. The server
+        // then announces its authoritative topology, which the client mirrors;
+        // an older peer instead self-aligns on the first `Enter`.
+        let edge = self.cfg.lock().edge;
+        self.update_peer_edge(edge);
+        self.status.lock().edge = edge;
         self.set_focused(role == Mode::Server);
         if role == Mode::Server {
             // Fresh session with the pointer at a normal position: the edge
-            // tracker may fire immediately (no warp happened). The configured
-            // edge is the boundary towards the peer.
+            // tracker may fire immediately (no warp happened).
             *self.edge_tracker.lock() = EdgeTracker::new();
         } else {
             // The client starts in the forwarding state without a focus
             // transition, so start the move flusher explicitly.
+            self.edge_tracker.lock().hint_returned();
             self.start_flusher();
             // The cursor was here when the last session ended: take it back
             // immediately so a reconnect never snaps it to the other screen.
@@ -1392,6 +1620,7 @@ impl Engine {
             return;
         }
         self.set_focused(false);
+        self.set_peer_topology_support(false);
         {
             let mut status = self.status.lock();
             status.state = ConnState::Listening;
@@ -1399,6 +1628,7 @@ impl Engine {
             status.forwarding = false;
             status.focused = false;
             status.remote_active = false;
+            status.remote_edge = None;
         }
         self.ensure_pairing_code();
         self.refresh_pairing_status();
@@ -1422,12 +1652,14 @@ impl Engine {
         self.restore_focus
             .store(self.focused.load(Ordering::Relaxed), Ordering::Relaxed);
         self.set_focused(false);
+        self.set_peer_topology_support(false);
         {
             let mut status = self.status.lock();
             status.peer = None;
             status.forwarding = false;
             status.focused = false;
             status.remote_active = false;
+            status.remote_edge = None;
         }
         self.notify();
     }
@@ -1437,11 +1669,17 @@ impl Engine {
     }
 
     /// Push the full status snapshot to the host shell.
+    ///
+    /// Serialized end-to-end: two threads calling this concurrently used to
+    /// deliver their snapshots in arbitrary order, so a stale "forwarding"
+    /// state could land last and leave a shell swallowing the wrong keyboard.
     pub fn notify(&self) {
-        let mut status = self.status.lock();
-        self.refresh_metrics(&mut status);
-        let json = status.to_json();
-        drop(status);
+        let _ordering = self.notify_lock.lock();
+        let json = {
+            let mut status = self.status.lock();
+            self.refresh_metrics(&mut status);
+            status.to_json()
+        };
         self.host.on_status(&json);
     }
 
@@ -1550,6 +1788,36 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // No panic, no session required.
         assert!(!engine.has_session());
+    }
+
+    /// The geometric handoff is authoritative even without the additive
+    /// topology message (0.2.x peers, or a first connection with mismatched
+    /// per-machine settings): Enter{Right} means the peer is on our right, so
+    /// the local facing edge is Left and must be persisted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enter_corrects_the_peer_edge_without_topology() {
+        let host = Arc::new(RecordingHost::default());
+        let (engine, _dir) = make_engine(host);
+
+        // Both sides left at the default: the configuration says Right.
+        engine.set_local_edge(Edge::Right);
+        assert_eq!(engine.peer_edge(), Edge::Right);
+
+        engine.on_focus_granted(Edge::Right);
+        assert_eq!(engine.peer_edge(), Edge::Left, "mirror of the Enter edge");
+        assert_eq!(
+            engine.cfg.lock().edge,
+            Edge::Left,
+            "persisted for next time"
+        );
+        assert!(engine.status.lock().focused);
+        let status: serde_json::Value = serde_json::from_str(&engine.status_json()).unwrap();
+        assert_eq!(status["peer_edge"], "left");
+        assert_eq!(status["edge"], "left");
+
+        // A second Enter is idempotent.
+        engine.on_focus_granted(Edge::Right);
+        assert_eq!(engine.peer_edge(), Edge::Left);
     }
 
     #[test]

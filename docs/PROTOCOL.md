@@ -1,6 +1,6 @@
 # Protocol
 
-FlowLink wire protocol, version 1. One TCP connection carries one TLS
+FlowLink wire protocol, version 2. One TCP connection carries one TLS
 session carrying one FlowLink session, always initiated by the client.
 
 ## Framing
@@ -24,9 +24,16 @@ Every message is one frame:
 
 ## Version
 
-`PROTOCOL_VERSION = 1`. The server rejects a mismatched `Hello` and a client
+`PROTOCOL_VERSION = 2`. The server rejects a mismatched `Hello` and a client
 rejects a mismatched `HelloAck`, both with a `Bye` where possible. Version
 negotiation is not attempted.
+
+`Topology` is an **additive** message introduced for 0.3 peers without a
+protocol bump: bincode numbers enum variants in declaration order, so it was
+appended after `Bye` and every 0.2.x message keeps its index. A 0.3 build
+only sends it to a peer whose `Hello.version`/`HelloAck.version` is 0.3+;
+older peers simply never see the variant. `protocol::supports_topology`
+performs that check, and a unit test pins the variant indices.
 
 ## Handshake
 
@@ -57,9 +64,12 @@ Timeouts: TLS + `Hello`/`HelloAck` 10 s; the server allows 180 s for
 authentication/pairing after `Hello`; the client waits up to 300 s for the
 user to obtain a pairing code.
 
-The server refuses a second client with `Bye { reason: "server is busy with
-another client" }`. The client chooses the path itself: with a stored token
-it sends `Authenticate`, otherwise it goes straight to `PairRequest` — the
+The server refuses a second, *different* client with `Bye { reason: "server is
+busy with another client" }`. A reconnect from the **same device id** is not
+refused: its previous socket may still be inside the dead-man window after a
+Wi-Fi dropout, so the new connection replaces it and cancels the old session.
+The client chooses the auth path itself: with a stored token it sends
+`Authenticate`, otherwise it goes straight to `PairRequest` — the
 `known_device` flag in `HelloAck` is informational only. A stored token
 rejected by the server (`AuthResult { ok: false }`) falls back to the pairing
 flow on the same connection.
@@ -79,6 +89,7 @@ flow on the same connection.
 | `Heartbeat` | both ways | `seq: u64` | Sent every 1 s |
 | `Pong` | both ways | `seq: u64` | Echoes the heartbeat sequence; used for RTT |
 | `Reclaim` | both ways | – | The unfocused side asks for the shared cursor (hotkey / UI) |
+| `Topology` | both ways | `edge: Edge` | Local edge facing the peer changed; receiver mirrors it. 0.3+ peers only |
 | `Bye` | both ways | `reason: String` | Orderly end, e.g. `busy`, `shutting down`, `pairing timed out` |
 
 Messages that are invalid for a role or state are ignored (trace-logged)
@@ -91,18 +102,34 @@ Exactly one side owns the shared cursor (`focused`). Server/client only
 decide who listens; input routing is symmetric:
 
 - The **focused** side uses its local input locally. When its pointer crosses
-  its configured edge, it hides its cursor, sends
+  its peer-facing edge, it hides its cursor, sends
   `Input(Enter { edge, along_norm })` and starts forwarding every subsequent
   event as `Input`. The peer becomes focused and injects those events.
 - The **unfocused** side hides its cursor, captures all of its input and
   forwards it. Its keyboard therefore types into the focused screen.
+- **The peer-facing edge is shared state.** After the handshake the server
+  sends `Topology { edge }`; the client stores the mirror
+  (`edge.opposite()`) as its own facing edge and persists it. Changing the
+  edge on either side sends `Topology` again, so both computers move the seam
+  together instead of relying on two independent settings being mirrored by
+  hand. Any incoming `Enter` is also geometric truth and updates the local
+  facing edge to `Enter.edge.opposite()` — this self-heals a mismatched
+  configuration and 0.2.x peers, which have no `Topology`.
 - Pressing the hotkey on the unfocused side sends `Reclaim`; the focused side
   stops showing the cursor (the requester warps its own cursor to the edge
   facing the peer). Pressing the hotkey on the focused side sends `Enter`
   instead, handing the cursor over.
+- **Injected-edge return:** when the physical mouse is on the other computer,
+  the focused side receives synthetic moves. Its injector watches them: after
+  `Enter` the pointer must travel 40 px inside, then 28 px of outward
+  overshoot at the peer-facing edge causes the shell to issue a local
+  `HandOff` command; the core (only if still focused and on that edge) sends
+  `Enter` back. One physical mouse can therefore cross the shared seam in
+  both directions with no hotkey.
 - Every focus change emits a local `ReleaseAll` so no key/button stays held.
 - At session start the **server** side is focused; the client begins by
-  forwarding. Reconnects reset to that state.
+  forwarding. A client that owned the cursor when the link dropped reclaims
+  it immediately after reconnecting.
 
 | Variant | Fields | Semantics |
 | --- | --- | --- |
@@ -151,9 +178,9 @@ Mouse buttons use HID button-page ids: `1` left, `2` right, `4` middle.
 
 Each side sends `Heartbeat { seq }` every 1 s and answers with `Pong { seq }`.
 The round trip updates the RTT metric (the last 8 pending pongs are kept). If
-no frame of any kind arrives for 6 s (`DEAD_AFTER`), the session errors out;
-the client then re-enters its backoff loop. On shutdown a session sends
-`Bye { reason: "shutting down" }` before closing.
+no frame of any kind arrives for 30 s (`DEAD_AFTER`), the session errors out;
+the client then re-enters its backoff loop (250 ms → 4 s). On shutdown a
+session sends `Bye { reason: "shutting down" }` before closing.
 
 ## Discovery (mDNS/DNS-SD)
 

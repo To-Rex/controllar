@@ -536,6 +536,25 @@ pub unsafe extern "C" fn flowlink_request_control(core: *mut FlCore) {
     }
 }
 
+/// The focused shell's injector saw the synthetic pointer pushed past the
+/// edge facing the peer (the physical mouse is on the other desk). Hand the
+/// shared cursor back over `edge` (`FL_EDGE_*`), at `along_norm` (0..1).
+///
+/// The core validates that this side is focused and that the edge is indeed
+/// the peer-facing one, so a stale call can never steal focus.
+///
+/// # Safety
+/// `core` must be a valid handle from [`flowlink_new`].
+#[no_mangle]
+pub unsafe extern "C" fn flowlink_hand_off(core: *mut FlCore, edge: i32, along_norm: f64) {
+    if let Some(engine) = engine(core) {
+        engine.execute(Cmd::HandOff {
+            edge: edge_from_c(edge),
+            along_norm: along_norm.clamp(0.0, 1.0) as f32,
+        });
+    }
+}
+
 /// Server role: toggle driving the remote device (UI button / menu bar).
 ///
 /// # Safety

@@ -16,7 +16,7 @@ tanishtiriladi va keyin o‘zaro eslab qolinadi.
 | **Bitta umumiy kursor** | Bir vaqtda bitta ekranda bo‘ladi; qaysi kompyuterda bo‘lsa, **o‘sha tomondagi** klaviatura/sichqoncha uni boshqaradi (server/client faqat kim tinglashi bilan farq qiladi). |
 | **Juftlik kodi** | Server ekranida ko‘rinadigan 6 xonali kod. 10 daqiqa amal qiladi, 5 marta xato kiritilsa yangilanadi. |
 | **Hotkey** | Kursorni bir kompyuterdan ikkinchisiga o‘tkazuvchi tugmalar birikmasi. Standart: `Ctrl + Alt + Space` (ikkala kompyuterda ham ishlaydi). |
-| **Chet (edge)** | Har bir kompyuterda o‘zaro qarama-qarshi tomondagi chegara (masalan Windows — o‘ng, Mac — chap). Kursor shu chetdan chiqsa, narigi ekranga o‘tadi. |
+| **Chet (edge)** | Narigi kompyuterga qaragan ekran chegarasi. Bir marta sozlanadi — 0.3.0 da ikkinchi kompyuterga avtomatik sinxronlanadi. Kursor shu chetdan chiqsa, narigi ekranga o‘tadi. |
 
 ## 2. Talablar
 
@@ -94,15 +94,22 @@ client avtomatik ulanadi (token orqali, kodsiz).
 - **Kursorni o‘tkazish:** aktiv kompyuterda sichqonchani **narigi kompyuterga
   qaragan chetga** suring (masalan Windows o‘ng chetga, Mac chap chetga) —
   kursor ikkinchi ekranga o‘tadi va u yerda davom etadi.
+- **Bitta sichqoncha bilan qaytish ham ishlaydi:** kursor ikkinchi ekranda
+  bo‘lganda ham o‘sha sichqonchani narigi tomondagi chetga suring — kursor
+  qaytib keladi. Dastur buni “ko‘rinmas” (sintetik) kursorning chetdan
+  oshib ketishidan aniqlaydi; hotkey shart emas.
 - **`Ctrl + Alt + Space`** istalgan klaviaturada kursorni bu yerga/nariga
   o‘tkazadi. Aktiv bo‘lmagan tomonda bossangiz — kursor shu tomonga keladi;
-  aktiv tomonda bossangiz — narigi tomonga ketadi.
-- **Chetlarni sozlash:** server (birinchi tinglovchi) kompyuterda **narigi
-  kompyuterga qaragan chetni** tanlash yetarli — kursor o‘sha chetdan chiqib
-  narigi ekranga o‘tadi. **Qaytish cheti avtomatik:** kursor qaysi chetdan
-  kirgan bo‘lsa, o‘sha chetdan orqaga chiqadi (ikki tomonda chetlarni bir
-  xil qilib sozlash shart emas). Kursor chetdan 24 px ichkarida paydo
-  bo‘ladi, shuning uchun tasodifiy kichik harakat fokusni qaytarmaydi.
+  aktiv tomonda bossangiz — narigi tomonga ketadi. Tugmani bosib ushlab
+  turish fokusni takror-takror almashtirmaydi.
+- **Chetlarni sozlash (endi avtomatik):** **bitta** kompyuterda narigi
+  kompyuterga qaragan chetni tanlang (masalan Windows’da `Right`). 0.3.0
+  o‘rnatilgan ikkala kompyuter bu chetni avtomatik sinxronlaydi va eslab
+  qoladi — Mac’da qarama-qarshi tomon o‘zi tanlanadi. Kursor chetdan 24 px
+  ichkarida paydo bo‘ladi, shuning uchun tasodifiy kichik harakat fokusni
+  qaytarmaydi. Agar chet noto‘g‘ri tomonda bo‘lsa, istalgan kompyuterda
+  Sozlamalar → **Cursor edge** dan almashtiring — ikkinchi tomon ham darhol
+  yangilanadi.
 - **Clipboard**: matn ikki tomonga avtomatik sinxronlanadi (1 MB gacha).
   Parol menejerlarining “concealed” nusxalari **hech qachon** uzatilmaydi.
 - **Fon rejimi**: oynani yopsangiz ham dastur menu bar/tray’da ishlashda davom
@@ -120,18 +127,23 @@ client avtomatik ulanadi (token orqali, kodsiz).
 | **„Found on this network“ ro‘yxatida server ko‘rinmayapti** | Windows Firewall discovery (UDP 5353) ni bloklayapti yoki routerda „client isolation“ yoqilgan. Yechim: serverdagi **NETWORK** kartasidagi manzilni (masalan `192.168.1.50:24800`) clientda **Connect manually**ga kiriting — bu har doim ishlaydi. |
 | **Umuman ulanmayapti (Wi-Fi ↔ Ethernet)** | Ikkala kompyuter **bitta router/tarmoqda** bo‘lishi kerak. Birinchi tekshiruv: Windows’da `ipconfig` → `192.168.x.x`, Mac’da `ifconfig` → bir xil `192.168.x.*` bo‘lishi kerak. Windows’da firewall ruxsatini bajaring (yuqoriga qarang). |
 | Client serverni ko‘rmayapti | Ikkala kompyuter bir tarmoqda ekaniga ishonch hosil qiling; server rejimida “Listening” holatida turishi kerak. Manuel IP bilan urinib ko‘ring. |
-| **Mac → Windows tomon kursor o‘tmayapti (hotkey ham, chekka ham ishlamayapti)** | macOS event tap ishlamayapti — demak ruxsat yo‘qolgan. System Settings → Privacy & Security’da **Accessibility** va **Input Monitoring**’da FlowLink’ni **OFF → ON** qilib qayta yoqing (dastur **har bir yangi build dan keyin** qayta ruxsat so‘raydi — macOS imzo o‘zgargani uchun). Ilova banner ko‘rsatadi; logda `local input capture is NOT active` va sababi yoziladi, `local input is reaching the engine` esa tap tirikligini tasdiqlaydi. |
+| **Mac → Windows tomon kursor o‘tmayapti (hotkey ham, chekka ham ishlamayapti)** | 1) macOS event tap ishlamayapti — ruxsat yo‘qolgan. System Settings → Privacy & Security’da **Accessibility** va **Input Monitoring**’da FlowLink’ni **OFF → ON** qilib qayta yoqing (dastur **har bir yangi build dan keyin** qayta ruxsat so‘raydi — macOS imzo o‘zgargani uchun). Ilova banner ko‘rsatadi; logda `local input capture is NOT active` va sababi yoziladi, `local input is reaching the engine` esa tap tirikligini tasdiqlaydi. 2) Agar logda `local input is reaching the engine` bo‘lsa-yu kursor o‘tmasa: ikkala kompyuterda ham **0.3.0** turganini tekshiring (Sozlamalar → versiya). 0.3.0 da chet avtomatik sinxronlanadi; eski 0.2.x da chetlar qo‘lda qarama-qarshi qilib sozlanishi shart edi. |
+| **Kursor faqat bitta tomonga o‘tadi** | 0.3.0 da bu tuzatildi: chet endi qurilmalar o‘rtasida sinxronlanadi, `Enter` orqali o‘zini tuzatadi va sintetik kursorning chetdan oshishi ham fokusni qaytaradi. Ikkala buildni yangilang va bir marta macOS ruxsatlarini OFF→ON qiling. |
 | Ruxsat so‘ralmagan / ishlmayapti | System Settings → Privacy & Security’da FlowLink’ga Accessibility va Input Monitoring bering (yuqoriga qarang), dasturni qayta ishga tushiring. |
-| Kursor to‘satdan eski o‘rniga qaytib ketmoqda / uzilish-qayta ulanish takrorlanmoqda | 0.2.2 da tuzatildi (ramka uzilishlari va yopilish sabablari). Agar takrorlansa: logda `session closed:` yoki `frame exceeds maximum` sababini toping — endi har bir uzilishda sabab ko‘rsatiladi va tomonlar `Bye` xabari bilan xayrlashadi. |
+| Kursor to‘satdan eski o‘rniga qaytib ketmoqda / uzilish-qayta ulanish takrorlanmoqda | 0.3.0 da fokus va status yuborish tartibi qat’iy ketma-ket qilindi; eski “status eskirib qolishi” va qulf (deadlock) muammolari tuzatildi. Qayta ulanish endi 250 ms–4 s oraliqda, bir xil qurilma qayta ulansa server uni “band” deb rad etmaydi. Agar takrorlansa: logda `session closed:` sababini toping. |
 | Klaviatura ishlamayapti (macOS) | Parol maydonlari va Terminal’dagi *Secure Keyboard Entry* rejimida tizim sintetik klaviaturani bloklaydi — bu macOS cheklovi. |
-| Windows’da ba’zi dasturlar javob bermayapti | Administrator sifatida ochilgan oynalar (UAC doirasi) FlowLink’ni ham administrator qilib ishga tushirishni talab qiladi. |
+| Windows’da ba’zi dasturlar javob bermayapti | Administrator sifatida ochilgan oynalar (UAC doirasi) FlowLink’ni ham administrator qilib ishga tushirishni talab qiladi. Yangi versiya buni bir marta ogohlantiradi (`SendInput was blocked`). |
 | Kod eskirgan | Serverda “New code” tugmasini bosing (yoki 3 xato urinishdan keyin avtomatik yangilanadi). |
 | Log kerak bo‘lsa | Sozlamalar → Open logs folder yoki dastur ichidagi **Logs** sahifasi. |
 
-> **Muhim:** eski versiyada bu muammolar (QR chiqmasligi, firewall) tuzatilmagan.
-> Ikkala kompyuterda ham **yangilangan build** ishlayotganiga ishonch hosil
-> qiling (Mac: `./scripts/build-macos.sh` → `dist/FlowLink.app`;
-> Windows: `cargo build --release -p flowlink-win`).
+> **Muhim:** 0.3.0 da kursorning ikki tomonlama o‘tishi, klaviatura fokusi,
+> chet sinxronizatsiyasi va qayta ulanish tuzatilgan. **Ikkala kompyuterda ham
+> 0.3.0** ishlayotganiga ishonch hosil qiling (Mac:
+> `./scripts/build-macos.sh` → `dist/FlowLink.app`;
+> Windows: `cargo build --release -p flowlink-win`). macOS’da har bir yangi
+> build dan keyin Accessibility va Input Monitoring ruxsatlarini **OFF → ON**
+> qilishni unutmang — aks holda dastur Mac klaviaturasi/sichqonchasini
+> o‘qiy olmaydi va logda sabab ko‘rinadi.
 
 ## 7. Xavfsizlik qisqacha
 
@@ -153,5 +165,5 @@ client avtomatik ulanadi (token orqali, kodsiz).
 ## 9. Sinovlar
 
 ```bash
-./scripts/test.sh        # Rust (unit + 2 ta haqiqiy e2e stsenariy) + Swift testlar
+./scripts/test.sh        # Rust (unit + e2e) + Swift testlar
 ```

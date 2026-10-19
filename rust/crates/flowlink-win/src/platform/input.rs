@@ -28,7 +28,7 @@
 
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, LazyLock, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -47,19 +47,20 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::HHOOK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, PeekMessageW,
-    PostThreadMessageW, SetCursorPos, SetWindowsHookExW, ShowCursor, TranslateMessage,
+    PostThreadMessageW, SetCursorPos, SetTimer, SetWindowsHookExW, ShowCursor, TranslateMessage,
     UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
     PM_NOREMOVE, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
 };
 
 /// One wheel notch, in `mouseData` units on Windows.
@@ -127,10 +128,40 @@ static CAPTURE_STATE: OnceLock<Arc<RwLock<CaptureState>>> = OnceLock::new();
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
 
+/// Watchdog timer ticks (500 ms each): screen-geometry refresh and the
+/// "pointer pinned to an edge while forwarding" rescue.
+static WATCHDOG_TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// Injection failures and the one-shot "input is blocked" warning.
+static SENDINPUT_FAILURES: AtomicU64 = AtomicU64::new(0);
+static SENDINPUT_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// True between the first hotkey key-down and its key-up. Windows repeats
+/// `WM_KEYDOWN` while a key is held; without this guard, holding the toggle
+/// chord would flip the cursor back and forth at the repeat rate.
+static HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
+
+/// VK codes whose key-down was delivered to the local OS (this side was
+/// focused). If focus moves away before the release, that release must still
+/// pass through locally or the local app sees a stuck key.
+static LOCAL_HELD_KEYS: LazyLock<Mutex<HashSet<u16>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Mouse buttons whose press was delivered locally (1/2/4); their release
+/// must reach the local OS even after focus moved away, or the drag sticks.
+static LOCAL_HELD_BUTTONS: LazyLock<Mutex<HashSet<u16>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 /// Cursor tracking for relative mouse deltas (physical, unmirrored coords).
 static MOUSE_SEEN: AtomicBool = AtomicBool::new(false);
 static LAST_MOUSE_X: AtomicI32 = AtomicI32::new(0);
 static LAST_MOUSE_Y: AtomicI32 = AtomicI32::new(0);
+
+/// After `Enter` warps the pointer, the hook can still have a move event in
+/// flight whose absolute point predates the warp. Zeroing deltas for a short
+/// window (and re-baselining on each event) prevents that stale event from
+/// being reported as a screen-wide jump — which used to bounce focus back.
+static POSITION_GUARD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Handle for the dedicated hook thread.
 pub struct CaptureHandle {
@@ -221,10 +252,23 @@ pub fn update_forwarding(forwarding: bool) {
     set_cursor_hidden(&mut injection, forwarding);
 }
 
+/// Tell the injector which local edge faces the peer (from the engine
+/// status). This matters at session start, when the server owns the cursor
+/// but no `Enter` has arrived yet to seed the tracker.
+pub fn set_peer_edge(edge: Option<Edge>) {
+    let mut state = INJECTION.lock();
+    state.edge.set_peer_edge(edge);
+}
+
 /// Enable/disable hook processing (UI switch or shutdown).
 pub fn set_capture_enabled(enabled: bool) {
     if let Some(state) = CAPTURE_STATE.get() {
         state.write().capture_enabled = enabled;
+    }
+    if !enabled {
+        LOCAL_HELD_KEYS.lock().clear();
+        LOCAL_HELD_BUTTONS.lock().clear();
+        HOTKEY_HELD.store(false, Ordering::Relaxed);
     }
 }
 
@@ -314,6 +358,14 @@ unsafe fn install_hooks() -> Result<u32> {
     let mut msg = MSG::default();
     let _ = PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE);
 
+    // Periodic rescue timer: Windows stops reporting position changes once
+    // the (hidden) pointer is pinned to a desktop edge, so forwarding can
+    // otherwise freeze at that edge. The timer also keeps the engine's screen
+    // geometry in sync after resolution / monitor changes.
+    if SetTimer(HWND::default(), 1, 500, None) == 0 {
+        tracing::debug!("watchdog timer could not be created");
+    }
+
     Ok(GetCurrentThreadId())
 }
 
@@ -337,11 +389,35 @@ unsafe fn message_pump() {
             // 0 = WM_QUIT, -1 = error.
             break;
         }
+        if msg.message == WM_TIMER {
+            watchdog_tick();
+            continue;
+        }
         let _ = TranslateMessage(&msg);
         let _ = DispatchMessageW(&msg);
     }
     unhook();
     info!("input hook thread stopped");
+}
+
+/// Runs on the hook thread every 500 ms.
+fn watchdog_tick() {
+    let tick = WATCHDOG_TICKS.fetch_add(1, Ordering::Relaxed);
+    // Refresh screen geometry every 2 s: a resolution change, DPI change or
+    // monitor hot-plug must never leave the edge math in a stale coordinate
+    // space.
+    if tick % 4 == 0 {
+        if let Some(engine) = ENGINE.get() {
+            engine.execute(Cmd::SetLocalScreen(local_screen()));
+        }
+    }
+    let forwarding = CAPTURE_STATE
+        .get()
+        .map(|state| state.read().forwarding)
+        .unwrap_or(false);
+    if forwarding {
+        recenter_if_outside_runway();
+    }
 }
 
 /// Pass the event to the next hook in the chain.
@@ -374,26 +450,82 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 
     let snapshot = *state.read();
     if !snapshot.capture_enabled {
+        // Hooks paused: do not leave the repeat guard latched from a chord
+        // that was held while capture stopped.
+        HOTKEY_HELD.store(false, Ordering::Relaxed);
         return pass_through(code, wparam, lparam);
     }
 
-    let Some(usage) = super::hid::vk_to_hid(info.vkCode as u16) else {
+    // Track whether this key-down was delivered locally. Repeats while
+    // focused just keep it in the set; a key pressed while forwarding is not
+    // local and its release stays swallowed.
+    let vk = info.vkCode as u16;
+    let release_locally = {
+        let mut held = LOCAL_HELD_KEYS.lock();
+        if down {
+            if !snapshot.forwarding {
+                held.insert(vk);
+            }
+            false
+        } else {
+            held.remove(&vk)
+        }
+    };
+
+    let Some(usage) = super::hid::vk_to_hid(vk) else {
+        // The keyboard belongs to the focused computer: an unmapped key
+        // cannot be forwarded, but it must not leak into this machine's
+        // local apps while this side is forwarding either. Its release still
+        // passes if its press was local.
+        if snapshot.forwarding && !release_locally {
+            return LRESULT(1);
+        }
         return pass_through(code, wparam, lparam);
     };
     let mods = super::hid::modifiers_from_vk_states();
     let is_hotkey = snapshot.is_hotkey(usage, mods);
 
-    // Every key is fed to the engine: while this side owns the cursor the
-    // engine ignores it (the shell passes it through), while the cursor is on
-    // the peer the engine forwards it there.
+    // The toggle chord is ours: fire once on the initial key-down, swallow
+    // auto-repeat, and swallow the release even if the modifiers were let go
+    // first (otherwise the next press could be ignored by the repeat guard).
+    if usage == snapshot.hotkey_usage {
+        if down {
+            if is_hotkey {
+                if !HOTKEY_HELD.swap(true, Ordering::Relaxed) {
+                    engine.execute(Cmd::HostInput(HostInput::Key {
+                        usage,
+                        down: true,
+                        modifiers: Modifiers::from_bits(mods),
+                    }));
+                }
+                return LRESULT(1);
+            }
+        } else {
+            let was_held = HOTKEY_HELD.swap(false, Ordering::Relaxed);
+            if was_held || is_hotkey {
+                // A key that was already delivered locally must be released
+                // locally even if its chord became the hotkey afterwards.
+                if release_locally {
+                    return pass_through(code, wparam, lparam);
+                }
+                return LRESULT(1);
+            }
+        }
+    }
+
+    // Every other key is fed to the engine: while this side owns the cursor
+    // the engine ignores it (the shell passes it through), while the cursor is
+    // on the peer the engine forwards it there.
     engine.execute(Cmd::HostInput(HostInput::Key {
         usage,
         down,
         modifiers: Modifiers::from_bits(mods),
     }));
 
-    // Swallow the hotkey (it is ours) and anything sent to the peer.
-    if is_hotkey || snapshot.forwarding {
+    // Swallow anything sent to the peer, except the release of a key that
+    // was pressed locally before focus moved away (that release clears the
+    // local OS state).
+    if snapshot.forwarding && !release_locally {
         return LRESULT(1);
     }
     pass_through(code, wparam, lparam)
@@ -422,7 +554,19 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     // edge detection, the other side forwards it to the peer.
     match wparam.0 as u32 {
         WM_MOUSEMOVE => {
-            let (dx, dy) = mouse_delta(info.pt.x, info.pt.y);
+            // Compute the real delta *before* any recenter warp: the warp
+            // resets the baseline, so recentering first used to turn the next
+            // event into a huge spurious jump (the cursor visibly teleported
+            // whenever forwarding neared a screen edge).
+            let (mut dx, mut dy) = mouse_delta(info.pt.x, info.pt.y);
+            // Events already in flight when Enter warped the pointer still
+            // carry the old absolute position; their position-derived delta
+            // is meaningless. Drop it and keep re-baselining until the warp
+            // has settled.
+            if flowlink_core::util::now_ms() < POSITION_GUARD_UNTIL_MS.load(Ordering::Relaxed) {
+                dx = 0.0;
+                dy = 0.0;
+            }
             // While forwarding, the physical pointer is clamped at the
             // desktop edges. Position-based deltas then read as zero and the
             // remote cursor freezes (keyboard keeps working, so it looks like
@@ -457,12 +601,28 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             // A button event may move the pointer implicitly; refresh the
             // delta baseline so the next move is not inflated.
             let _ = mouse_delta(info.pt.x, info.pt.y);
+            let button_id = match button {
+                MouseButton::Left => 1u16,
+                MouseButton::Right => 2,
+                MouseButton::Middle => 4,
+            };
+            let release_locally = {
+                let mut held = LOCAL_HELD_BUTTONS.lock();
+                if down {
+                    if !snapshot.forwarding {
+                        held.insert(button_id);
+                    }
+                    false
+                } else {
+                    held.remove(&button_id)
+                }
+            };
             engine.execute(Cmd::HostInput(HostInput::MouseButton {
                 button,
                 down,
                 modifiers: Modifiers::from_bits(super::hid::modifiers_from_vk_states()),
             }));
-            if snapshot.forwarding {
+            if snapshot.forwarding && !release_locally {
                 return LRESULT(1);
             }
             pass_through(code, wparam, lparam)
@@ -520,6 +680,13 @@ const RUNWAY_MARGIN: i32 = 160;
 /// to the middle keeps deltas flowing; the user never sees it because the
 /// local cursor is hidden for the duration of remote control.
 fn recenter_if_outside_runway() {
+    if !CAPTURE_STATE
+        .get()
+        .map(|state| state.read().forwarding)
+        .unwrap_or(false)
+    {
+        return;
+    }
     let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
     if width <= RUNWAY_MARGIN * 2 || height <= RUNWAY_MARGIN * 2 {
@@ -566,6 +733,8 @@ struct InjectionState {
     pressed_buttons: HashSet<u8>,
     /// Whether [`set_cursor_hidden`] currently holds the cursor hidden.
     cursor_hidden: bool,
+    /// Injected-edge return state (see `platform::edge_push`).
+    edge: super::edge_push::EdgePushTracker,
 }
 
 static INJECTION: LazyLock<Mutex<InjectionState>> =
@@ -575,11 +744,17 @@ static INJECTION: LazyLock<Mutex<InjectionState>> =
 pub fn inject(event: &InputEvent) {
     let mut state = INJECTION.lock();
     match *event {
-        InputEvent::Enter { edge, along_norm } => enter(edge, along_norm),
+        InputEvent::Enter { edge, along_norm } => enter(&mut state, edge, along_norm),
         InputEvent::MouseMove { dx, dy } => {
+            detect_injected_edge(&mut state, dx as f64, dy as f64);
             let (dx, dy) = (dx.round() as i32, dy.round() as i32);
             if dx != 0 || dy != 0 {
-                send(&[mouse_input(dx, dy, MOUSEEVENTF_MOVE, 0)]);
+                send(&[mouse_input(
+                    dx,
+                    dy,
+                    MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+                    0,
+                )]);
             }
         }
         InputEvent::MouseButton { button, down, .. } => button_event(&mut state, button, down),
@@ -596,7 +771,7 @@ pub fn inject(event: &InputEvent) {
 /// Place the pointer at the mirrored entry position for `edge`, a comfortable
 /// distance inside the screen so a sideways twitch cannot immediately hand
 /// focus back.
-fn enter(edge: Edge, along_norm: f32) {
+fn enter(state: &mut InjectionState, edge: Edge, along_norm: f32) {
     const INSET: f64 = 24.0;
     let screen = local_screen();
     let (x, y) = flowlink_core::edge::enter_position(edge, along_norm, screen);
@@ -616,10 +791,70 @@ fn enter(edge: Edge, along_norm: f32) {
     // in union-screen pixels.
     let target_x = target_x.round() as i32 + origin_x;
     let target_y = target_y.round() as i32 + origin_y;
+    // The cursor is coming to this computer: show it *before* the pointer
+    // jumps (the status callback that also does this is asynchronous).
+    set_cursor_hidden(state, false);
     // SAFETY: SetCursorPos has no preconditions beyond a valid point.
     let result = unsafe { SetCursorPos(target_x, target_y) };
     if let Err(err) = result {
         warn!("SetCursorPos({target_x}, {target_y}) failed: {err}");
+    }
+    // The warp is not user motion. Reset the capture delta baseline or the
+    // first real move would be reported as a jump across the screen (and could
+    // immediately push focus back again).
+    MOUSE_SEEN.store(true, Ordering::Relaxed);
+    LAST_MOUSE_X.store(target_x, Ordering::Relaxed);
+    LAST_MOUSE_Y.store(target_y, Ordering::Relaxed);
+    POSITION_GUARD_UNTIL_MS.store(flowlink_core::util::now_ms() + 80, Ordering::Relaxed);
+
+    // Return-edge state for this stay: the edge the cursor came in through is
+    // the mirror of the sender's exit edge. Re-arm only after moving inward.
+    state.edge.enter(edge);
+}
+
+/// Detect a deliberate outward push at the peer-facing edge while this side
+/// owns the cursor.
+///
+/// The physical mouse may be on the *other* computer, so the local low-level
+/// hook never sees those movements (synthetic events are deliberately
+/// ignored there). The injector is the only place that can notice the cursor
+/// being pinned to the edge and hand the shared cursor back. The decision
+/// itself is the tested `EdgePushTracker`; this function only converts Win32
+/// coordinates into the union-local space it expects.
+fn detect_injected_edge(state: &mut InjectionState, dx: f64, dy: f64) {
+    let screen = local_screen();
+    if screen.width <= 1.0 || screen.height <= 1.0 {
+        return;
+    }
+    let (origin_x, origin_y) = virtual_origin();
+    let mut point = POINT::default();
+    // SAFETY: `point` is a valid writable POINT.
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return;
+    }
+    let local_x = (point.x - origin_x) as f64;
+    let local_y = (point.y - origin_y) as f64;
+    let Some((edge, along)) = state.edge.feed(
+        local_x,
+        local_y,
+        dx.round(),
+        dy.round(),
+        screen.width,
+        screen.height,
+        flowlink_core::util::now_ms(),
+    ) else {
+        return;
+    };
+    if let Some(engine) = ENGINE.get() {
+        tracing::info!(
+            edge = edge.as_str(),
+            along,
+            "injected pointer crossed the peer edge — handing back"
+        );
+        engine.execute(Cmd::HandOff {
+            edge,
+            along_norm: along,
+        });
     }
 }
 
@@ -712,7 +947,11 @@ fn to_mouse_data(value: f64) -> u32 {
     clamped as u32
 }
 
-/// Release every key/button the peer currently holds and re-show the cursor.
+/// Release every key/button the peer currently holds.
+///
+/// Cursor visibility is deliberately *not* touched here: it is driven by the
+/// forwarding state alone. Showing it on every release used to make the cursor
+/// flash when focus changed (and could leave it visible while forwarding).
 fn release_all_inner(state: &mut InjectionState) {
     for usage in state.pressed_keys.drain() {
         if let Some(vk) = super::hid::hid_to_vk(usage) {
@@ -734,20 +973,32 @@ fn release_all_inner(state: &mut InjectionState) {
         };
         send(&[mouse_input(0, 0, flags, 0)]);
     }
-    set_cursor_hidden(state, false);
 }
 
 /// Show/hide the local cursor, guarded so the display counter stays balanced.
+///
+/// `ShowCursor`'s display counter is process-wide and may have been moved by
+/// other code, so a single call is not guaranteed to flip the cursor: hide
+/// until the count is negative and restore until it is non-negative.
 fn set_cursor_hidden(state: &mut InjectionState, hidden: bool) {
     if state.cursor_hidden == hidden {
         return;
     }
     state.cursor_hidden = hidden;
+    let mut guard = 0;
     // SAFETY: ShowCursor only adjusts this process' cursor display counter.
     unsafe {
-        let _ = ShowCursor(!hidden);
+        if hidden {
+            while ShowCursor(false) >= 0 && guard < 32 {
+                guard += 1;
+            }
+        } else {
+            while ShowCursor(true) < 0 && guard < 32 {
+                guard += 1;
+            }
+        }
     }
-    trace!(hidden, "local cursor visibility changed");
+    trace!(hidden, guard, "local cursor visibility changed");
 }
 
 /// Send a batch of synthetic input events.
@@ -756,9 +1007,30 @@ fn send(inputs: &[INPUT]) {
     // Win32 expects for the structure version we link against.
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent as usize != inputs.len() {
-        // Normal when an elevated window (UAC/secure desktop) has focus, or
-        // when the input desktop is not reachable (locked session).
-        trace!(sent, expected = inputs.len(), "SendInput incomplete");
+        // Normal while a higher-integrity window (UAC) owns the input
+        // desktop, or when the session is locked — but it is also the reason
+        // "the other keyboard types nothing", so surface it once.
+        let failures = SENDINPUT_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+        trace!(
+            sent,
+            expected = inputs.len(),
+            failures,
+            "SendInput incomplete"
+        );
+        if !SENDINPUT_WARNED.swap(true, Ordering::Relaxed) {
+            warn!(
+                sent,
+                expected = inputs.len(),
+                "SendInput was blocked — an elevated window or the secure desktop owns input; \
+                 run FlowLink as administrator to type into elevated apps"
+            );
+            if let Some(engine) = ENGINE.get() {
+                engine.notice(
+                    "input",
+                    "Windows blocked synthetic input (an elevated app or the secure desktop is focused). Run FlowLink as administrator to control elevated windows.",
+                );
+            }
+        }
     }
 }
 
@@ -781,17 +1053,28 @@ fn mouse_input(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS, data: u32) -> INPUT {
 
 /// Build a keyboard `INPUT` record from a virtual-key code.
 fn key_input(vk: u16, up: bool) -> INPUT {
+    // Extended keys (navigation cluster, arrows, numpad divide/numlock,
+    // Windows/Apps keys, right Ctrl/Alt) need the extended flag or some apps
+    // (and many games) do not see them at all.
+    let extended = matches!(
+        vk,
+        0x21..=0x28 | 0x2D | 0x2E | 0x5B..=0x5D | 0x6F | 0x90
+    );
+    let mut flags = if up {
+        KEYEVENTF_KEYUP
+    } else {
+        KEYBD_EVENT_FLAGS(0)
+    };
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(vk),
                 wScan: 0,
-                dwFlags: if up {
-                    KEYEVENTF_KEYUP
-                } else {
-                    KEYBD_EVENT_FLAGS(0)
-                },
+                dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
             },

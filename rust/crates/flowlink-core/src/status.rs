@@ -145,7 +145,7 @@ pub struct Status {
     /// Deprecated alias of [`Status::forwarding`] kept for older shells.
     pub remote_active: bool,
     /// This side owns the shared cursor: local input is used locally and the
-    /// configured edge hands the cursor to the peer.
+    /// peer-facing edge hands the cursor to the peer.
     pub focused: bool,
     /// This side's input is being captured and forwarded to the peer (the
     /// shared cursor is on the other computer).
@@ -155,6 +155,10 @@ pub struct Status {
     pub remote_edge: Option<Edge>,
     /// Server: configured edge the cursor exits through.
     pub edge: Edge,
+    /// Local edge facing the peer for the current session. Unlike `edge` this
+    /// is the *effective* side: it follows the session topology and the edge
+    /// an `Enter` actually came through, so both machines always agree.
+    pub peer_edge: Edge,
     pub clipboard_enabled: bool,
     /// Configured maximum clipboard text size (bytes).
     pub clipboard_max_bytes: usize,

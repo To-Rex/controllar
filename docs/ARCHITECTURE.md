@@ -46,7 +46,14 @@ One `Engine` instance owns the runtime:
   A `SessionGuard` deregisters the slot on any exit path.
 - **Status** — the engine mutates `Status` under a lock and serializes it to
   JSON for the host on every meaningful change (`on_status`), plus every
-  500 ms tick. The UI renders exclusively from this snapshot.
+  500 ms tick. Publication is serialized end-to-end by `notify_lock`, so an
+  older snapshot can never overtake a newer one (which would leave a shell
+  swallowing the wrong keyboard). The UI renders exclusively from this
+  snapshot.
+- **Lock order** — no code path holds the config lock while taking the status
+  lock: `notify` reads config before locking status, and `ForgetDevice`
+  clones its data before touching status. This ordering was the source of a
+  real ABBA deadlock (UI Forget + a session publishing status).
 - **Pairing** — the server keeps one live `PairingCode`; the client parks a
   typed code in `pending_pair_code`, which the session's pairing flow polls
   at least every 250 ms (no startup races).
@@ -80,19 +87,45 @@ focus transfer:
 
 `HostInput::MouseMove` carries the absolute cursor position (union-screen
 pixels) plus the pixel delta; `EdgeTracker` activates once when the cursor is
-on the configured edge and pushing outward (`REARM_MARGIN_PX = 10.0`,
+on the peer-facing edge and pushing outward (`REARM_MARGIN_PX = 10.0`,
 `PUSH_EPSILON_PX = 0.4`), sending `InputEvent::Enter { edge, along_norm }` and
-starting to forward. The edge used while focused is the one the cursor
-arrived through (`focus_edge = Enter.edge.opposite()`), falling back to the
-configured edge, so mismatched per-machine settings cannot cause instant
-returns; the shell places the pointer 24 px inside the edge so a sideways
-twitch is not a deliberate push. While forwarding, moves go through the
-coalescer (flush at most every 4 ms; an 8 ms flusher covers the tail) and all
-other events are forwarded directly. Any focus switch sends
-`InputEvent::ReleaseAll` locally so no key or button stays held. The shell
-hides the physical cursor while forwarding and passes events through while
-focused; injected events carry a marker (`eventSourceUserData`) so the tap
-never forwards them back.
+starting to forward. The edge used while focused is the **peer-facing edge**
+(`Engine::peer_edge`), not a per-event read of the local config:
+
+- the server announces its edge after the handshake (`Message::Topology`);
+  the client mirrors it and persists it;
+- either side changing the edge in Settings sends the same message, so the
+  seam moves on both machines immediately;
+- every incoming `Enter` is geometric truth (the mirror of the sender's exit
+  edge), so a mismatched or older configuration self-heals;
+- the shells place the pointer 24 px inside the edge so a sideways twitch is
+  not a deliberate push.
+
+While forwarding, moves go through the coalescer (flush at most every 4 ms;
+an 8 ms flusher covers the tail; pending motion is flushed before every
+discrete key/button/scroll event). Any focus switch sends
+`InputEvent::ReleaseAll` locally so no injected key or button stays held.
+Both capture layers also remember which physical keys/buttons they delivered
+locally, so if focus moves away while one is held its *release* still reaches
+the local OS (otherwise an app could see a stuck key or an endless drag). The
+shell hides the physical cursor while forwarding and passes events through
+while focused; injected events carry a marker (`eventSourceUserData` on
+macOS, `LL*HF_INJECTED` on Windows) so the tap/hook never forwards them
+back.
+
+**Injected-edge return.** A physical mouse on the machine that does *not* own
+the cursor moves the remote cursor with synthetic events, which the local
+capture path deliberately ignores. Without more, that mouse could never push
+the cursor back. Both shells therefore run a small pure state machine
+(`EdgePushTracker`, implemented and unit-tested in Swift and Rust) over every
+injected move: after `Enter` the pointer must first travel 40 px inside, then
+28 px of outward overshoot at the peer-facing edge triggers
+`Cmd::HandOff { edge, along }`. The shell also seeds the tracker from
+`Status::peer_edge`, so the server can detect the return even at session
+start, when it owns the cursor but has not received an `Enter` yet. The core
+re-validates that it is focused and that the edge matches, then performs the
+normal `Enter` handoff. A one-second cooldown keeps a rejected handoff
+(session gone) from disabling the gesture.
 
 Because `Input` flows both ways, the keyboard on either desk types into the
 focused screen and either mouse moves the shared cursor — the "one body"
@@ -107,8 +140,8 @@ session pump ──► Engine::handle_incoming_input ──► Host::on_input �
 Events are dropped unless `forwarding`, except `Enter` and `ReleaseAll`.
 The macOS injector owns a private serial queue, warps the cursor to the
 mirrored edge on `Enter`, injects via `CGEvent` (`.cghidEventTap`), and calls
-back (`→ Cmd::RequestControl` → `Message::Reclaim`) when the user pushes the
-cursor past the return edge.
+`Cmd::HandOff` when injected movement crosses the peer-facing edge. The
+Windows injector does the same with `SendInput`/`SetCursorPos`.
 
 Session pump guarantees (`session.rs`): reads go through a `FrameReader` that
 keeps partial reads in the reader itself, so a `tokio::select!` branch
@@ -197,11 +230,13 @@ normalization), `edge` (activation, hysteresis, mirrored enter geometry),
 (single/many frames, EOF handling, oversized rejection, partial-frame
 survival when a future is dropped mid-read), `hid` (modifier
 flags), `host` (notice JSON), `pairing` (code shape, attempts, expiry,
-constant-time compare), `protocol` (message round-trips, garbage rejection),
-`session` (oversized outbound skipped, stream stays framed), `qr` (link
-round-trip, noisy parse, defaults), `transport` (TLS round-trip,
-fingerprint visibility), `util` (clock/hostname sanity), plus FFI conversion
-tests and Swift `KeyCodes` tests.
+constant-time compare), `protocol` (message round-trips, garbage rejection,
+append-only variant indices, topology capability), `session` (oversized
+outbound skipped, stream stays framed), `qr` (link round-trip, noisy parse,
+defaults), `transport` (TLS round-trip, fingerprint visibility), `util`
+(clock/hostname sanity), the Windows `edge_push` state machine (re-arm,
+threshold, cooldown), plus FFI conversion tests and Swift `KeyCodes` /
+`EdgePushTracker` tests.
 
 `rust/crates/flowlink-core/tests/e2e_pairing.rs` runs two full engines with
 real TCP + TLS on loopback and free ephemeral ports:
@@ -217,6 +252,13 @@ real TCP + TLS on loopback and free ephemeral ports:
    returns the server to `listening`.
 6. Reconnecting without a code succeeds with the stored token, and clipboard
    now flows server → client.
+7. Mismatched edge settings are corrected from the server topology and the
+   cursor still round-trips.
+8. An injected-edge push (`Cmd::HandOff`) returns focus; a push on the wrong
+   edge is ignored.
+9. Changing the edge while connected syncs both configs and the new axis is
+   used for the next handoff.
+10. `cursor_round_trips_repeatedly` performs three full round-trips.
 
 A second test drives a wrong code (rejected, no connection), then submits the
 correct one on the still-open connection and reaches `connected`.

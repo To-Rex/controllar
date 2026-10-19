@@ -253,12 +253,18 @@ mod tests {
         let waker = std::task::Waker::noop();
         let mut cx = Context::from_waker(waker);
         let first = reader.poll_frame(&mut cx);
-        assert!(first.is_pending(), "must be waiting for the rest of the payload");
+        assert!(
+            first.is_pending(),
+            "must be waiting for the rest of the payload"
+        );
 
         // Another branch of the select would have completed here; the frame
         // then continues arriving.
         a.write_all(&raw[6..]).await.unwrap();
         let frame = reader.read_frame().await.unwrap().unwrap();
-        assert_eq!(frame, payload, "bytes consumed before the drop must survive");
+        assert_eq!(
+            frame, payload,
+            "bytes consumed before the drop must survive"
+        );
     }
 }

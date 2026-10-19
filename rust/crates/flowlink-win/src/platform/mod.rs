@@ -9,6 +9,8 @@
 
 // HID tables are pure data (plus tests) — compiled everywhere.
 pub mod hid;
+// Pure injected-edge state machine — compiled and tested everywhere.
+pub mod edge_push;
 
 #[cfg(windows)]
 pub mod autostart;
@@ -86,6 +88,8 @@ pub mod input {
     }
 
     pub fn update_forwarding(_forwarding: bool) {}
+
+    pub fn set_peer_edge(_edge: Option<Edge>) {}
 
     pub fn set_capture_enabled(_enabled: bool) {}
 

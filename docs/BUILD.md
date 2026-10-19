@@ -48,7 +48,14 @@ Configuration, identity and logs live in
 
 ## Windows
 
-From the `rust` directory (PowerShell):
+From the repository root (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+# stages: dist\FlowLink-Windows\FlowLink.exe
+```
+
+Or directly from `rust`:
 
 ```powershell
 cargo build --release -p flowlink-win
@@ -67,6 +74,9 @@ windows.
   command line includes `--autostart`, which starts the app hidden in the
   tray rather than showing the window.
 - Config, identity and logs live in `%APPDATA%\FlowLink`.
+- **Both computers must run the same 0.3.x build** for automatic edge sync
+  (`Topology`) and injected-cursor edge return. A 0.2.x peer still connects
+  (protocol 2) but keeps the older geometry fallback; the UI shows a notice.
 
 Platform notes for the Windows shell are maintained in
 `rust/crates/flowlink-win/`; prefer those sources over this summary if the

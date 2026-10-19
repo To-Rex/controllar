@@ -132,6 +132,19 @@ public final class CoreBridge {
     /// Client role: return control to the server (edge push / hotkey).
     public func requestControl() { withHandle { flowlink_request_control($0) } }
 
+    /// The focused injector saw the synthetic cursor pushed past the
+    /// peer-facing edge: hand the shared cursor back over that edge.
+    public func handOff(edge: FLEdge, along: Double) {
+        let value: Int32
+        switch edge {
+        case .left: value = FLEdgeC.left
+        case .right: value = FLEdgeC.right
+        case .top: value = FLEdgeC.top
+        case .bottom: value = FLEdgeC.bottom
+        }
+        withHandle { flowlink_hand_off($0, value, along) }
+    }
+
     /// Server role: toggle driving the remote device.
     public func toggleControl() { withHandle { flowlink_toggle_control($0) } }
 

@@ -14,6 +14,15 @@ capture and inject input and render the UI.
   switchable at any time from Settings; input sharing itself is symmetric:
   the keyboard and mouse on **either** computer drive whichever screen shows
   the shared cursor.
+- **One cursor, either direction** — the edge facing the other computer is
+  exchanged and mirrored automatically (0.3+ on both sides), so a cursor
+  pushed out on one screen always returns through the matching edge on the
+  other. When the cursor is moved by the *other* computer's mouse, the local
+  injector notices the pointer being pushed past the edge and hands control
+  back too — one mouse is enough, no hotkey needed.
+- **Focus-following keyboard** — the keyboard on either desk types into the
+  screen that shows the shared cursor; focus changes suppress the local side
+  before a keystroke can leak.
 - **Connect any way you like** — mDNS auto-discovery of servers on the LAN,
   manual IP/port entry, scanning the server's QR code, or pasting a
   `flowlink://connect?...` link.
@@ -113,12 +122,14 @@ elevated windows.
 3. Type or scan the code. Both devices now remember each other: the server
    stores an entry with a 32-byte token, the client stores the token in
    `last_server`, and later connections authenticate silently.
-4. Move the cursor across the edge you configured on **each** machine
-   (e.g. Mac = Left, Windows = Right when the Windows PC sits on the left),
-   or press the hotkey **Ctrl+Alt+Space** on either keyboard. The cursor
-   jumps to the other screen, hides here, and the keyboard at either desk
-   now types into the focused screen. Press the hotkey again (or push the
-   cursor back across the edge) to bring it back.
+4. Move the cursor across the edge you configured on **either** machine.
+   The two computers mirror the setting automatically: set it once (for
+   example Mac = Left, Windows = Right when the Windows PC sits on the left),
+   and the other side follows and remembers it. Press the hotkey
+   **Ctrl+Alt+Space** on either keyboard to jump the cursor to the other
+   screen; the keyboard at either desk then types into the focused screen.
+   Push the cursor back across the facing edge (or press the hotkey again) to
+   bring it back.
 5. Text copied on one side appears on the other side's pasteboard
    (≤ 1 MiB, concealment types excluded).
 
@@ -154,9 +165,13 @@ Details, threat model and explicit non-goals: [docs/SECURITY.md](docs/SECURITY.m
 
 ## Status
 
-v1 targets macOS 13+ and Windows 10+ in either role, one active peer per
-server. Deliberately not included: clipboard images, audio/notification sync,
-and Linux/Wayland shells. Input is bidirectional (either keyboard/mouse can
+v0.3 targets macOS 13+ and Windows 10+ in either role, one active peer per
+server. Update **both** computers to 0.3.0 to get automatic edge sync and
+injected-cursor edge return; a 0.2.x peer still connects (protocol 2), but
+only gets the geometric fallback after the first handoff.
+
+Deliberately not included: clipboard images, audio/notification sync, and
+Linux/Wayland shells. Input is bidirectional (either keyboard/mouse can
 drive the focused screen). Platform quirks — secure input fields, UIPI,
 mixed-DPI feel, keyboard layouts — are documented in
 [docs/PLATFORM-LIMITS.md](docs/PLATFORM-LIMITS.md).

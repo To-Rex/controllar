@@ -204,7 +204,13 @@ async fn run_server_session(
     // the peer logs the reason instead of "peer closed connection without
     // sending TLS close_notify", which made every teardown look like a crash.
     if let Err(err) = &result {
-        let _ = send(&mut writer, &Message::Bye { reason: format!("{err:#}") }).await;
+        let _ = send(
+            &mut writer,
+            &Message::Bye {
+                reason: format!("{err:#}"),
+            },
+        )
+        .await;
     }
     let _ = writer.shutdown().await;
     result
@@ -253,20 +259,44 @@ async fn server_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         ));
     }
 
-    // Single-client policy: politely refuse while busy.
-    if engine.has_session() {
-        let _ = send(
-            writer,
-            &Message::Bye {
-                reason: "server is busy with another client".into(),
-            },
-        )
-        .await;
-        tracing::info!(%peer, client = %hello.name, "refused connection: busy");
-        return Ok(());
+    // Single-client policy: politely refuse a *different* client while busy.
+    // A reconnect of the same device must never be refused: its previous
+    // socket can linger for the whole dead-man window after a Wi-Fi dropout,
+    // and rejecting it used to add tens of seconds to every recovery.
+    if let Some(existing) = engine.session_device_id() {
+        if existing != hello.device_id {
+            let _ = send(
+                writer,
+                &Message::Bye {
+                    reason: "server is busy with another client".into(),
+                },
+            )
+            .await;
+            tracing::info!(%peer, client = %hello.name, "refused connection: busy");
+            return Ok(());
+        }
+        tracing::info!(
+            %peer,
+            client = %hello.name,
+            "same device reconnecting — replacing its lingering session"
+        );
     }
 
     let paired = engine.cfg.lock().find_paired(&hello.device_id).cloned();
+    // Remember whether this peer understands the additive Topology message.
+    // Older 0.2.x builds decode unknown variants as errors, so they must
+    // never receive one; they fall back to geometric self-alignment on Enter.
+    let topology = protocol::supports_topology(&hello.version);
+    engine.set_peer_topology_support(topology);
+    if !topology {
+        engine.notice(
+            "version",
+            &format!(
+                "{} runs an older FlowLink ({}) — update both computers to get automatic edge sync",
+                hello.name, hello.version
+            ),
+        );
+    }
     let ack = Message::HelloAck(HelloAck {
         protocol: PROTOCOL_VERSION,
         device_id: engine.own_device_id(),
@@ -394,11 +424,25 @@ async fn server_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 
     // ---- Ready ---------------------------------------------------------
+    // A client may have held this connection through a long pairing window
+    // while another session registered; re-check the single-client rule now.
+    if let Some(existing) = engine.session_device_id() {
+        if existing != hello.device_id {
+            let _ = send(
+                writer,
+                &Message::Bye {
+                    reason: "server is busy with another client".into(),
+                },
+            )
+            .await;
+            tracing::info!(%peer, client = %hello.name, "refused connection: busy");
+            return Ok(());
+        }
+    }
     let (tx, rx) = mpsc::unbounded_channel();
-    // Registers unconditionally: a reconnect arriving while the previous
-    // session is still tearing down replaces it (and cancels it) instead of
-    // being rejected with "server is busy", which used to block every
-    // reconnect after a network dropout.
+    // Registers unconditionally for the same device: a reconnect arriving
+    // while the previous session is still tearing down replaces it (and
+    // cancels it) instead of waiting for the dead-man timer.
     let session_id =
         engine.register_session(Mode::Server, &hello.device_id, tx, session_cancel.clone());
     let guard = SessionGuard::new(engine.clone(), session_id);
@@ -414,6 +458,10 @@ async fn server_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     engine.refresh_pairing_status();
     engine.notice("connected", &format!("{} is connected", hello.name));
     engine.on_session_ready(Mode::Server);
+    // Authoritative geometry: whichever way this screen faces the peer is
+    // mirrored on the client, so both machines agree on the return edge even
+    // when their local settings were configured inconsistently.
+    engine.announce_topology();
 
     let result = pump(
         engine.clone(),
@@ -492,10 +540,9 @@ async fn run_client_session(
     cancel: CancellationToken,
 ) -> Result<SessionOutcome> {
     let connector = transport::tls_connector();
-    let stream =
-        transport::connect_tls(&connector, &target.host, target.port, HANDSHAKE_TIMEOUT)
-            .await
-            .with_context(|| format!("connecting to {}:{}", target.host, target.port))?;
+    let stream = transport::connect_tls(&connector, &target.host, target.port, HANDSHAKE_TIMEOUT)
+        .await
+        .with_context(|| format!("connecting to {}:{}", target.host, target.port))?;
 
     // ---- Identity check (pin or TOFU) ----------------------------------
     let presented = transport::stream_peer_fingerprint(&stream);
@@ -535,7 +582,13 @@ async fn run_client_session(
     // Handshake-level failures never reach the pump: tell the server why we
     // are dropping instead of leaving it with an unexplained EOF.
     if let Err(err) = &result {
-        let _ = send(&mut writer, &Message::Bye { reason: format!("{err:#}") }).await;
+        let _ = send(
+            &mut writer,
+            &Message::Bye {
+                reason: format!("{err:#}"),
+            },
+        )
+        .await;
     }
     let _ = writer.shutdown().await;
     result
@@ -578,6 +631,16 @@ async fn client_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             "protocol mismatch: the server speaks {}, this build speaks {PROTOCOL_VERSION} — update FlowLink on both computers",
             ack.protocol
         ));
+    }
+    engine.set_peer_topology_support(protocol::supports_topology(&ack.version));
+    if !engine.peer_supports_topology() {
+        engine.notice(
+            "version",
+            &format!(
+                "{} runs an older FlowLink ({}) — update both computers to get automatic edge sync",
+                ack.name, ack.version
+            ),
+        );
     }
 
     let addr_string = format!("{}:{}", target.host, target.port);
@@ -634,9 +697,7 @@ async fn client_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
     // ---- Pairing if needed ---------------------------------------------
     if !authenticated {
-        let token =
-            client_pairing_flow(&engine, reader, writer, target, &cancel)
-                .await?;
+        let token = client_pairing_flow(&engine, reader, writer, target, &cancel).await?;
         token_used = Some(token);
     }
 
@@ -928,6 +989,11 @@ async fn on_session_message(engine: &Arc<Engine>, role: Mode, msg: Message) -> R
         // The peer asked for the cursor (hotkey on its side).
         Message::Reclaim => {
             engine.on_reclaim();
+        }
+        // The peer moved the shared seam (the screen edge facing the other
+        // computer). Mirror it and persist it locally.
+        Message::Topology { edge } => {
+            engine.apply_remote_topology(edge);
         }
         // Clipboard flows both ways.
         Message::Clipboard { text } => {

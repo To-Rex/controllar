@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{DeviceId, InputEvent, Mode, ScreenInfo};
+use crate::types::{DeviceId, Edge, InputEvent, Mode, ScreenInfo};
 
 /// Protocol version understood by this build.
 ///
@@ -101,6 +101,19 @@ pub enum Message {
     Bye {
         reason: String,
     },
+    /// Either side: the local screen edge that faces the peer just changed.
+    ///
+    /// The receiver mirrors it (`edge.opposite()`) and adopts it as its own
+    /// peer-facing edge, so the two machines can never disagree about which
+    /// way the cursor has to leave a screen.
+    ///
+    /// Deliberately the **last** variant: bincode numbers variants in
+    /// declaration order, so adding it after `Bye` keeps every 0.2.x message
+    /// (including `Bye`) at its old index. It is only ever sent to peers that
+    /// advertise a 0.3+ version; older builds would fail to decode it.
+    Topology {
+        edge: Edge,
+    },
 }
 
 impl Message {
@@ -118,8 +131,25 @@ impl Message {
             Message::Heartbeat { .. } => "Heartbeat",
             Message::Pong { .. } => "Pong",
             Message::Reclaim => "Reclaim",
+            Message::Topology { .. } => "Topology",
             Message::Bye { .. } => "Bye",
         }
+    }
+}
+
+/// True when a peer advertising `version` understands [`Message::Topology`].
+///
+/// The message was added without bumping [`PROTOCOL_VERSION`] so 0.2.x peers
+/// keep connecting; they must simply never receive the new variant. Peers
+/// older than the feature therefore only get the geometric self-alignment
+/// that rides on `Enter`.
+pub fn supports_topology(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+    match (major, minor) {
+        (Some(major), Some(minor)) => (major, minor) >= (0, 3),
+        _ => false,
     }
 }
 
@@ -233,9 +263,37 @@ mod tests {
         roundtrip(Message::Heartbeat { seq: 7 });
         roundtrip(Message::Pong { seq: 7 });
         roundtrip(Message::Reclaim);
+        roundtrip(Message::Topology { edge: Edge::Left });
         roundtrip(Message::Bye {
             reason: "busy".into(),
         });
+    }
+
+    /// Bincode encodes enum variants by declaration order. Adding a variant
+    /// in the middle would silently reinterpret every later message from an
+    /// older peer (e.g. its `Bye` would arrive as `Topology`). Keep new
+    /// variants at the end and pin the contract here.
+    #[test]
+    fn variant_indices_are_append_only() {
+        fn index(msg: &Message) -> u32 {
+            let bytes = encode(msg).expect("encode");
+            u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"))
+        }
+        assert_eq!(index(&Message::Reclaim), 10);
+        assert_eq!(index(&Message::Bye { reason: "x".into() }), 11);
+        assert_eq!(index(&Message::Topology { edge: Edge::Left }), 12);
+    }
+
+    #[test]
+    fn topology_capability_follows_the_version() {
+        assert!(!supports_topology("0.2.2"));
+        assert!(!supports_topology("0.2.99"));
+        assert!(supports_topology("0.3.0"));
+        assert!(supports_topology("0.3"));
+        assert!(supports_topology("1.0.0"));
+        assert!(supports_topology("0.3.0-beta"));
+        assert!(!supports_topology("unknown"));
+        assert!(!supports_topology(""));
     }
 
     #[test]

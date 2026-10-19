@@ -542,3 +542,261 @@ async fn cursor_round_trips_repeatedly() {
     .await;
     result.expect("round-trip scenario timed out");
 }
+
+/// Helper: start a paired server/client pair with the given edges.
+async fn paired_pair(
+    server_edge: Edge,
+    client_edge: Edge,
+) -> (
+    Arc<Engine>,
+    Arc<RecordingHost>,
+    Arc<Engine>,
+    Arc<RecordingHost>,
+    TempDir,
+    TempDir,
+) {
+    let server_host = Arc::new(RecordingHost::default());
+    let (server, server_dir) = spawn_engine(server_host.clone());
+    let port = free_port();
+    server.execute(Cmd::SetListenPort(port));
+    server.execute(Cmd::SetEdge(server_edge));
+    server.execute(Cmd::Start);
+    wait_until("server listening", Duration::from_secs(10), || {
+        server_host.state() == "listening"
+    })
+    .await;
+    let code = {
+        let status: Value = serde_json::from_str(&server.status_json()).expect("status json");
+        status["pairing"]["code"].as_str().unwrap().to_string()
+    };
+
+    let client_host = Arc::new(RecordingHost::default());
+    let (client, client_dir) = spawn_engine(client_host.clone());
+    // Edge set *before* connecting, like a real installation with mismatched
+    // per-machine settings.
+    client.execute(Cmd::SetEdge(client_edge));
+    client.execute(Cmd::Connect {
+        host: "127.0.0.1".to_string(),
+        port,
+        code: Some(code),
+        fingerprint: None,
+    });
+    wait_until("both connected", Duration::from_secs(15), || {
+        server_host.state() == "connected" && client_host.state() == "connected"
+    })
+    .await;
+    (
+        server,
+        server_host,
+        client,
+        client_host,
+        server_dir,
+        client_dir,
+    )
+}
+
+/// The client's own edge setting may disagree with the server's (a very common
+/// real-world setup: both machines left at "right"). The server announces the
+/// topology, the client mirrors it, and the cursor must still return through
+/// the correct edge.
+#[tokio::test(flavor = "multi_thread")]
+async fn mismatched_client_edge_is_mirrored_from_the_server() {
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
+        // Server's peer is on its right; the client (wrongly) also says right.
+        let (server, server_host, client, client_host, _sd, _cd) =
+            paired_pair(Edge::Right, Edge::Right).await;
+
+        // The server owns the cursor at session start. Its announced topology
+        // must have corrected the client to the mirrored (left) edge.
+        wait_until(
+            "client mirrors the server edge",
+            Duration::from_secs(5),
+            || {
+                client_host
+                    .latest_status()
+                    .and_then(|s| s["peer_edge"].as_str().map(|v| v.to_string()))
+                    .as_deref()
+                    == Some("left")
+            },
+        )
+        .await;
+        let client_cfg: Value = serde_json::from_str(&client.config_json()).unwrap();
+        assert_eq!(client_cfg["edge"], "left", "mirrored edge is persisted");
+
+        // Server pushes out through its right edge.
+        server.execute(Cmd::HostInput(HostInput::MouseMove {
+            x_px: 1919.0,
+            y_px: 540.0,
+            dx: 18.0,
+            dy: 0.0,
+        }));
+        wait_until("client owns the cursor", Duration::from_secs(5), || {
+            client_host.focused()
+        })
+        .await;
+
+        // Client re-arms by moving inward, then pushes out through the
+        // *mirrored* left edge — even though its own setting said right.
+        client.execute(Cmd::HostInput(HostInput::MouseMove {
+            x_px: 300.0,
+            y_px: 540.0,
+            dx: 30.0,
+            dy: 0.0,
+        }));
+        client.execute(Cmd::HostInput(HostInput::MouseMove {
+            x_px: 0.0,
+            y_px: 540.0,
+            dx: -30.0,
+            dy: 0.0,
+        }));
+        wait_until(
+            "server owns the cursor again",
+            Duration::from_secs(5),
+            || server_host.focused(),
+        )
+        .await;
+        wait_until("client forwards again", Duration::from_secs(5), || {
+            client_host.forwarding()
+        })
+        .await;
+        assert!(
+            server_host.inputs().iter().any(|event| matches!(
+                event,
+                InputEvent::Enter {
+                    edge: Edge::Left,
+                    ..
+                }
+            )),
+            "the server must receive the mirrored return edge"
+        );
+    })
+    .await;
+    result.expect("mismatched-edge scenario timed out");
+}
+
+/// While the cursor is being driven by the *other* computer's mouse, the
+/// synthetic pointer hitting the edge must hand focus back — this is the path
+/// the local event tap cannot see. `Cmd::HandOff` models the injector.
+#[tokio::test(flavor = "multi_thread")]
+async fn injected_edge_push_hands_focus_back() {
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
+        let (server, server_host, client, client_host, _sd, _cd) =
+            paired_pair(Edge::Right, Edge::Left).await;
+
+        // Server → client: client now owns the cursor and its injector knows
+        // the peer-facing edge is left.
+        server.execute(Cmd::HostInput(HostInput::MouseMove {
+            x_px: 1919.0,
+            y_px: 540.0,
+            dx: 18.0,
+            dy: 0.0,
+        }));
+        wait_until("client owns the cursor", Duration::from_secs(5), || {
+            client_host.focused()
+        })
+        .await;
+
+        // A push on the wrong edge must be ignored (never steal focus).
+        client.execute(Cmd::HandOff {
+            edge: Edge::Right,
+            along_norm: 0.5,
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(client_host.focused(), "wrong-edge handoff must not fire");
+
+        // A push on the peer-facing edge returns the cursor.
+        client.execute(Cmd::HandOff {
+            edge: Edge::Left,
+            along_norm: 0.25,
+        });
+        wait_until(
+            "server owns the cursor again",
+            Duration::from_secs(5),
+            || server_host.focused(),
+        )
+        .await;
+        wait_until("client forwards again", Duration::from_secs(5), || {
+            client_host.forwarding()
+        })
+        .await;
+        wait_until(
+            "server received Enter{Left,0.25}",
+            Duration::from_secs(5),
+            || {
+                server_host.inputs().iter().any(|event| {
+                    matches!(
+                        event,
+                        InputEvent::Enter { edge: Edge::Left, along_norm }
+                            if (*along_norm - 0.25).abs() < 0.001
+                    )
+                })
+            },
+        )
+        .await;
+    })
+    .await;
+    result.expect("injected-edge scenario timed out");
+}
+
+/// Changing the edge on one computer must move the seam on both, immediately
+/// and persistently, without reconnecting.
+#[tokio::test(flavor = "multi_thread")]
+async fn topology_changes_sync_while_connected() {
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
+        let (server, server_host, client, client_host, _sd, _cd) =
+            paired_pair(Edge::Right, Edge::Left).await;
+        wait_until("initial topology", Duration::from_secs(5), || {
+            client_host
+                .latest_status()
+                .and_then(|s| s["peer_edge"].as_str().map(|v| v.to_string()))
+                .as_deref()
+                == Some("left")
+        })
+        .await;
+
+        // Move the seam to the top/bottom axis from the server side.
+        server.execute(Cmd::SetEdge(Edge::Top));
+        wait_until(
+            "client mirrored the new edge",
+            Duration::from_secs(5),
+            || {
+                client_host
+                    .latest_status()
+                    .and_then(|s| s["peer_edge"].as_str().map(|v| v.to_string()))
+                    .as_deref()
+                    == Some("bottom")
+            },
+        )
+        .await;
+        let server_cfg: Value = serde_json::from_str(&server.config_json()).unwrap();
+        let client_cfg: Value = serde_json::from_str(&client.config_json()).unwrap();
+        assert_eq!(server_cfg["edge"], "top");
+        assert_eq!(client_cfg["edge"], "bottom", "both configs stay mirrored");
+
+        // A hotkey handoff now leaves through the new edge.
+        server.execute(Cmd::ToggleControl);
+        wait_until("client owns the cursor", Duration::from_secs(5), || {
+            client_host.focused()
+        })
+        .await;
+        client.execute(Cmd::ToggleControl);
+        wait_until(
+            "server owns the cursor again",
+            Duration::from_secs(5),
+            || server_host.focused(),
+        )
+        .await;
+        assert!(
+            server_host.inputs().iter().any(|event| matches!(
+                event,
+                InputEvent::Enter {
+                    edge: Edge::Bottom,
+                    ..
+                }
+            )),
+            "the return must use the mirrored bottom edge"
+        );
+    })
+    .await;
+    result.expect("topology-sync scenario timed out");
+}

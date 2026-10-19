@@ -171,7 +171,7 @@ public struct SettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Cursor edge").font(.system(.callout, weight: .medium))
-                    Text("The edge of this screen that faces the other computer — crossing it moves the cursor there")
+                    Text("The edge of this screen that faces the other computer — crossing it moves the cursor there. It is synced with the other computer automatically.")
                         .font(.system(.caption))
                         .foregroundStyle(DS.textDim)
                 }

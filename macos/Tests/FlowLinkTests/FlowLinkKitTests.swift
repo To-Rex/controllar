@@ -61,8 +61,11 @@ final class StatusDecodingTests: XCTestCase {
           "peer": {"id": "dev-2", "name": "PC", "fingerprint": null, "addr": "10.0.0.9:24800", "paired": true, "since_ms": 42},
           "pairing": {"code": "123456", "attempts_left": 3, "expires_in_ms": 90000, "awaiting_input": false},
           "remote_active": true,
+          "focused": false,
+          "forwarding": true,
           "remote_edge": null,
           "edge": "right",
+          "peer_edge": "left",
           "clipboard_enabled": true,
           "hotkey": {"modifiers": 6, "usage": 44},
           "discovered": [{"id": "dev-3", "name": "Laptop", "fingerprint": "bb", "addr": "10.0.0.3", "port": 24800, "role": "server", "version": "0.1.0", "last_seen_ms": 7}],
@@ -82,6 +85,9 @@ final class StatusDecodingTests: XCTestCase {
         XCTAssertEqual(status.pairedDevices.first?.host, "10.0.0.9")
         XCTAssertEqual(status.pairedDevices.first?.port, 24800)
         XCTAssertEqual(status.edge, .right)
+        XCTAssertEqual(status.peerEdge, .left)
+        XCTAssertTrue(status.forwarding ?? false)
+        XCTAssertTrue(status.isForwarding)
         XCTAssertTrue(status.remoteActive)
     }
 
@@ -111,5 +117,185 @@ final class CoreLinkTests: XCTestCase {
         let version = flowlink_version()
         XCTAssertNotNil(version)
         XCTAssertTrue(String(cString: version!).contains("."))
+    }
+}
+
+final class EdgePushTrackerTests: XCTestCase {
+    private let width = 1920.0
+    private let height = 1080.0
+
+    /// Entered from a peer that exited `remoteEdge`, then moved well inside.
+    private func armed(remoteEdge: FLEdge) -> EdgePushTracker {
+        var tracker = EdgePushTracker()
+        tracker.enter(remoteEdge: remoteEdge)
+        let localEdge = remoteEdge.opposite
+        let inside: (Double, Double, Double, Double)
+        switch localEdge {
+        case .left: inside = (300, 500, 10, 0)
+        case .right: inside = (width - 300, 500, -10, 0)
+        case .top: inside = (500, 300, 0, 10)
+        case .bottom: inside = (500, height - 300, 0, -10)
+        }
+        XCTAssertNil(tracker.feed(
+            x: inside.0, y: inside.1, dx: inside.2, dy: inside.3,
+            width: width, height: height, nowNanos: 1
+        ))
+        return tracker
+    }
+
+    func testEnterMirrorsTheRemoteEdge() {
+        var tracker = EdgePushTracker()
+        tracker.enter(remoteEdge: .right)
+        XCTAssertEqual(tracker.peerEdge, .left)
+        tracker.enter(remoteEdge: .top)
+        XCTAssertEqual(tracker.peerEdge, .bottom)
+        tracker.clear()
+        XCTAssertNil(tracker.peerEdge)
+    }
+
+    func testPushAtTheFacingEdgeHandsOff() {
+        var tracker = armed(remoteEdge: .right) // local facing edge = left
+        XCTAssertNil(tracker.feed(
+            x: 0, y: 540, dx: -10, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+        let result = tracker.feed(
+            x: 0, y: 540, dx: -20, dy: 0,
+            width: width, height: height, nowNanos: 3
+        )
+        XCTAssertEqual(result?.0, .left)
+        XCTAssertEqual(result?.1 ?? 0, 0.5, accuracy: 0.01)
+    }
+
+    func testTailOfTheEntryMoveDoesNotBounceBack() {
+        var tracker = EdgePushTracker()
+        tracker.enter(remoteEdge: .right) // enters at x = 24, facing left
+        XCTAssertNil(tracker.feed(
+            x: 24, y: 540, dx: -24, dy: 0,
+            width: width, height: height, nowNanos: 1
+        ))
+        XCTAssertNil(tracker.feed(
+            x: 0, y: 540, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+    }
+
+    func testInwardTravelRearms() {
+        var tracker = EdgePushTracker()
+        tracker.enter(remoteEdge: .right)
+        XCTAssertNil(tracker.feed(
+            x: 0, y: 540, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 1
+        ))
+        XCTAssertNil(tracker.feed(
+            x: 100, y: 540, dx: 100, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+        XCTAssertNotNil(tracker.feed(
+            x: 0, y: 540, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 3
+        ))
+    }
+
+    func testCooldownRecoversFromARejectedHandoff() {
+        var tracker = armed(remoteEdge: .right)
+        XCTAssertNotNil(tracker.feed(
+            x: 0, y: 540, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 10
+        ))
+        XCTAssertNil(tracker.feed(
+            x: 0, y: 540, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 11
+        ))
+        let later = 10 + EdgePushTracker.cooldownNanos
+        XCTAssertNil(tracker.feed(
+            x: 500, y: 540, dx: 40, dy: 0,
+            width: width, height: height, nowNanos: later
+        ))
+        XCTAssertNotNil(tracker.feed(
+            x: 0, y: 540, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: later + 1
+        ))
+    }
+
+    func testPushesAwayFromTheFacingEdgeAreIgnored() {
+        var tracker = armed(remoteEdge: .right) // facing left
+        XCTAssertNil(tracker.feed(
+            x: width - 1, y: 540, dx: 30, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+        XCTAssertNil(tracker.feed(
+            x: 900, y: 0, dx: 0, dy: -30,
+            width: width, height: height, nowNanos: 3
+        ))
+    }
+
+    func testVerticalEdge() {
+        var tracker = armed(remoteEdge: .bottom) // local facing edge = top
+        let result = tracker.feed(
+            x: 800, y: 0, dx: 0, dy: -30,
+            width: width, height: height, nowNanos: 2
+        )
+        XCTAssertEqual(result?.0, .top)
+        XCTAssertEqual(result?.1 ?? 0, 800.0 / width, accuracy: 0.01)
+    }
+}
+
+final class EdgePushTrackerStatusTests: XCTestCase {
+    private let width = 1920.0
+    private let height = 1080.0
+
+    func testEdgeCanBeLearnedWithoutAnEnter() {
+        var tracker = EdgePushTracker()
+        tracker.setPeerEdge(.left)
+        XCTAssertEqual(tracker.peerEdge, .left)
+        // Move inside first, then push over the facing edge.
+        XCTAssertNil(tracker.feed(
+            x: 300, y: 500, dx: 10, dy: 0,
+            width: width, height: height, nowNanos: 1
+        ))
+        XCTAssertNotNil(tracker.feed(
+            x: 0, y: 500, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+    }
+
+    func testChangingTheStatusEdgeResetsTheGesture() {
+        var tracker = EdgePushTracker()
+        tracker.setPeerEdge(.left)
+        // This only arms the tracker; a real push follows.
+        XCTAssertNil(tracker.feed(
+            x: 300, y: 500, dx: 10, dy: 0,
+            width: width, height: height, nowNanos: 1
+        ))
+        XCTAssertNotNil(tracker.feed(
+            x: 0, y: 500, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 2
+        ))
+
+        tracker.setPeerEdge(.right)
+        XCTAssertNil(tracker.feed(
+            x: 0, y: 500, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 3
+        ))
+        XCTAssertNil(tracker.feed(
+            x: width - 300, y: 500, dx: -10, dy: 0,
+            width: width, height: height, nowNanos: 4
+        ))
+        XCTAssertNotNil(tracker.feed(
+            x: width - 1, y: 500, dx: 30, dy: 0,
+            width: width, height: height, nowNanos: 5
+        ))
+    }
+
+    func testNilEdgeDisablesTheGesture() {
+        var tracker = EdgePushTracker()
+        tracker.setPeerEdge(.left)
+        tracker.setPeerEdge(nil)
+        XCTAssertNil(tracker.peerEdge)
+        XCTAssertNil(tracker.feed(
+            x: 0, y: 500, dx: -30, dy: 0,
+            width: width, height: height, nowNanos: 1
+        ))
     }
 }

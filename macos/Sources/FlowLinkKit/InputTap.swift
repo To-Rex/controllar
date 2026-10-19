@@ -41,6 +41,13 @@ public final class InputTap {
     private var runLoop: CFRunLoop?
     private var thread: Thread?
     private var pressedModifierUsages = Set<UInt16>() // tap-thread only
+    /// Keys/modifiers whose press was delivered locally (this side was
+    /// focused) and whose release must therefore also reach macOS even if the
+    /// focus changed in between — otherwise the local app sees a stuck key.
+    private var locallyHeldUsages = Set<UInt16>() // tap-thread only
+    /// Mouse buttons whose press was delivered locally; their release must
+    /// also reach macOS if focus moved away while the button was held.
+    private var locallyHeldButtons = Set<UInt16>() // tap-thread only
 
     public init(shared: TapSharedState) {
         self.shared = shared
@@ -91,6 +98,9 @@ public final class InputTap {
         let thread = Thread { [weak self] in
             guard let self, let tap = self.tap else { return }
             let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            self.pressedModifierUsages.removeAll()
+            self.locallyHeldUsages.removeAll()
+            self.locallyHeldButtons.removeAll()
             self.runLoop = CFRunLoopGetCurrent()
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
@@ -140,7 +150,12 @@ public final class InputTap {
 
         case .keyDown, .keyUp:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            guard let usage = KeyCodes.hid(fromCGKeyCode: code) else { return pass }
+            guard let usage = KeyCodes.hid(fromCGKeyCode: code) else {
+                // The keyboard follows the focused screen. A key with no HID
+                // mapping cannot be forwarded, but it must not type locally
+                // while this Mac is driving the other computer either.
+                return state.forwarding ? nil : pass
+            }
             let modifiers = KeyCodes.modifiers(from: event.flags)
             let isHotkey = usage == state.hotkeyUsage && modifiers == state.hotkeyModifiers
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
@@ -148,20 +163,40 @@ public final class InputTap {
 
             if isHotkey {
                 // Forward once (press), suppress both press and release.
-                if down && !isRepeat {
-                    onInput?(makeKey(usage: usage, down: true, modifiers: modifiers))
-                } else if !down {
-                    onInput?(makeKey(usage: usage, down: false, modifiers: modifiers))
+                if down {
+                    if !isRepeat {
+                        onInput?(makeKey(usage: usage, down: true, modifiers: modifiers))
+                    }
+                    return nil
                 }
+                // If the key itself was pressed locally before the chord was
+                // completed, its release must reach macOS or the app sees a
+                // stuck key; do not forward a down the peer never got.
+                if locallyHeldUsages.remove(usage) != nil {
+                    return pass
+                }
+                onInput?(makeKey(usage: usage, down: false, modifiers: modifiers))
                 return nil
             }
 
+            var releaseLocally = false
+            if down {
+                if !isRepeat && !state.forwarding {
+                    locallyHeldUsages.insert(usage)
+                }
+            } else {
+                releaseLocally = locallyHeldUsages.remove(usage) != nil
+            }
             onInput?(makeKey(usage: usage, down: down, modifiers: modifiers))
-            return state.forwarding ? nil : pass
+            // A key pressed before the focus left must still release locally;
+            // keys pressed while forwarding stay swallowed.
+            return (state.forwarding && !releaseLocally) ? nil : pass
 
         case .flagsChanged:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            guard let usage = KeyCodes.hid(fromCGKeyCode: code) else { return pass }
+            guard let usage = KeyCodes.hid(fromCGKeyCode: code) else {
+                return state.forwarding ? nil : pass
+            }
             let down: Bool
             if pressedModifierUsages.contains(usage) {
                 pressedModifierUsages.remove(usage)
@@ -171,8 +206,16 @@ public final class InputTap {
                 down = true
             }
             let modifiers = KeyCodes.modifiers(from: event.flags)
+            var releaseLocally = false
+            if down {
+                if !state.forwarding {
+                    locallyHeldUsages.insert(usage)
+                }
+            } else {
+                releaseLocally = locallyHeldUsages.remove(usage) != nil
+            }
             onInput?(makeKey(usage: usage, down: down, modifiers: modifiers))
-            return state.forwarding ? nil : pass
+            return (state.forwarding && !releaseLocally) ? nil : pass
 
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             let point = state.metrics.normalized(event.location)
@@ -191,8 +234,18 @@ public final class InputTap {
             }
             let down = type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown
             let modifiers = KeyCodes.modifiers(from: event.flags)
+            var releaseLocally = false
+            if down {
+                if !state.forwarding {
+                    locallyHeldButtons.insert(button)
+                }
+            } else {
+                releaseLocally = locallyHeldButtons.remove(button) != nil
+            }
             onInput?(makeButton(button: button, down: down, modifiers: modifiers))
-            return state.forwarding ? nil : pass
+            // Do not leave a local drag stuck when focus moved away while the
+            // button was down: pass the release through locally.
+            return (state.forwarding && !releaseLocally) ? nil : pass
 
         case .scrollWheel:
             // Wire units: notches for discrete wheels (one per physical

@@ -162,6 +162,8 @@ pub struct StatusMirror {
     pub forwarding: bool,
     pub remote_edge: Option<Edge>,
     pub edge: Option<Edge>,
+    /// Effective edge facing the peer for this session (synced topology).
+    pub peer_edge: Option<Edge>,
     pub clipboard_enabled: bool,
     pub hotkey: Hotkey,
     pub discovered: Vec<DeviceMirror>,
@@ -285,6 +287,7 @@ impl AppShared {
     /// need (forwarding state, clipboard, hotkey).
     fn apply_status(&self, status: StatusMirror) {
         let forwarding = status.forwarding;
+        let peer_edge = status.peer_edge;
         {
             let mut capture = self.capture.write();
             capture.forwarding = forwarding;
@@ -294,6 +297,10 @@ impl AppShared {
             capture.hotkey_usage = status.hotkey.usage;
         }
         *self.status.write() = status;
+        // The injector needs the facing edge even before the first `Enter`
+        // (the server owns the cursor at session start, so it may never see
+        // one before synthetic input arrives).
+        input::set_peer_edge(peer_edge);
         // Idempotent: keeps the hook and the cursor in sync with every status,
         // even if a previous update was missed.
         input::update_forwarding(forwarding);
@@ -1081,7 +1088,7 @@ impl WinApp {
             card_title(ui, theme, "Screen edge");
             ui.label(
                 egui::RichText::new(
-                    "The edge of this screen that faces the other computer — crossing it moves the shared cursor there.",
+                    "The edge of this screen that faces the other computer — crossing it moves the shared cursor there. The setting is mirrored on the other computer automatically (0.3+).",
                 )
                 .size(11.0)
                 .color(theme.text_dim),

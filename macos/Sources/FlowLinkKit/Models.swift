@@ -184,6 +184,10 @@ public struct FLStatus: Codable {
     public var forwarding: Bool?
     public var remoteEdge: FLEdge?
     public var edge: FLEdge
+    /// Effective local edge facing the peer for this session (synced with the
+    /// other computer; may differ from the configured `edge` after a peer
+    /// topology update).
+    public var peerEdge: FLEdge?
     public var clipboardEnabled: Bool
     /// Core-enforced clipboard text limit (bytes); shells honor the same cap.
     public var clipboardMaxBytes: Int?
@@ -195,9 +199,11 @@ public struct FLStatus: Codable {
 
     enum CodingKeys: String, CodingKey {
         case app, version, mode, state, error, local, peer, pairing, edge, hotkey, discovered, metrics, listening
+        case focused, forwarding
         case reconnectInMs = "reconnect_in_ms"
         case remoteActive = "remote_active"
         case remoteEdge = "remote_edge"
+        case peerEdge = "peer_edge"
         case clipboardEnabled = "clipboard_enabled"
         case clipboardMaxBytes = "clipboard_max_bytes"
         case pairedDevices = "paired_devices"

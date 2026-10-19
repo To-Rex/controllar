@@ -146,6 +146,16 @@ const KEY_TABLE: [(u16, u16); 103] = [
 /// Translate a Windows virtual-key code into a USB HID usage id.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn vk_to_hid(vk: u16) -> Option<u16> {
+    // The low-level hook normally reports the side-specific VK_* codes, but
+    // some injection layers and older drivers report the generic modifier VK.
+    // Map those too, otherwise a held Shift/Ctrl/Alt would be swallowed (or
+    // dropped while forwarding) and every shortcut would fail.
+    match vk {
+        0x10 => return Some(usage::LEFT_SHIFT), // VK_SHIFT
+        0x11 => return Some(usage::LEFT_CTRL),  // VK_CONTROL
+        0x12 => return Some(usage::LEFT_ALT),   // VK_MENU
+        _ => {}
+    }
     KEY_TABLE
         .iter()
         .find(|(candidate, _)| *candidate == vk)
@@ -155,6 +165,11 @@ pub fn vk_to_hid(vk: u16) -> Option<u16> {
 /// Translate a USB HID usage id into a Windows virtual-key code.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn hid_to_vk(hid: u16) -> Option<u16> {
+    // There is only one VK for Return, so the keypad variant cannot live in
+    // the unique bidirectional table; handle it explicitly.
+    if hid == usage::KP_ENTER {
+        return Some(0x0D); // VK_RETURN
+    }
     KEY_TABLE
         .iter()
         .find(|(_, candidate)| *candidate == hid)
@@ -290,6 +305,13 @@ mod tests {
                 assert_ne!(hid, other_hid, "duplicate HID usage {hid:#04X} in table");
             }
         }
+    }
+
+    #[test]
+    fn generic_modifier_vks_map_to_the_left_side() {
+        assert_eq!(vk_to_hid(0x10), Some(usage::LEFT_SHIFT));
+        assert_eq!(vk_to_hid(0x11), Some(usage::LEFT_CTRL));
+        assert_eq!(vk_to_hid(0x12), Some(usage::LEFT_ALT));
     }
 
     #[test]

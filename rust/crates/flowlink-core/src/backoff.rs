@@ -20,9 +20,13 @@ impl Backoff {
         }
     }
 
-    /// Standard reconnect profile: 500 ms → 15 s.
+    /// Standard reconnect profile: 250 ms → 4 s.
+    ///
+    /// Short cap: on a LAN a peer that comes back (app restart, Wi-Fi blip,
+    /// cable reseat) should be usable within seconds, not after a 15 s
+    /// backoff. Jitter still prevents two clients from retrying in lockstep.
     pub fn reconnect() -> Self {
-        Self::new(500, 15_000)
+        Self::new(250, 4_000)
     }
 
     pub fn attempt(&self) -> u32 {

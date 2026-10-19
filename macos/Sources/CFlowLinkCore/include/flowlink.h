@@ -189,6 +189,16 @@ void flowlink_send_input(FlCore *core, const FlHostInput *event);
 /** Client role: user pushed the return edge — ask the server for control. */
 void flowlink_request_control(FlCore *core);
 
+/**
+ * The focused shell's injector saw the synthetic pointer pushed past the
+ * peer-facing edge (physical mouse on the other computer): hand the cursor
+ * back over `edge` (FL_EDGE_*) at `along_norm` (0..1).
+ *
+ * The core ignores the call unless this side is focused and `edge` is the
+ * current peer-facing edge.
+ */
+void flowlink_hand_off(FlCore *core, int32_t edge, double along_norm);
+
 /** Server role: toggle driving the remote device (UI/menu bar button). */
 void flowlink_toggle_control(FlCore *core);
 

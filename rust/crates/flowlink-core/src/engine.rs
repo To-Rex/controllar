@@ -1108,7 +1108,8 @@ impl Engine {
                 ls.token = Some(token.to_string());
                 ls.device_id = Some(server_id.to_string());
             }
-            cfg.paired_devices.push(PairedDevice {
+            // Upsert: reconnects must refresh the entry, not duplicate it.
+            cfg.upsert_paired(PairedDevice {
                 id: server_id.to_string(),
                 name: server_name.to_string(),
                 token: token.to_string(),

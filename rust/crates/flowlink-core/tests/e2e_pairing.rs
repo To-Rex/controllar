@@ -281,6 +281,18 @@ async fn two_engines_pair_and_exchange_input() {
             client_host.clipboards().iter().any(|t| t == "javob")
         })
         .await;
+
+        // Reconnects must refresh the remembered server, not duplicate it.
+        let client_cfg: Value = serde_json::from_str(&client.config_json()).expect("config json");
+        let remembered = client_cfg["paired_devices"].as_array().unwrap();
+        let server_id = client_cfg["last_server"]["device_id"]
+            .as_str()
+            .expect("server id");
+        let matching = remembered
+            .iter()
+            .filter(|device| device["id"] == server_id)
+            .count();
+        assert_eq!(matching, 1, "the server must be remembered exactly once");
     })
     .await;
     result.expect("integration scenario timed out");

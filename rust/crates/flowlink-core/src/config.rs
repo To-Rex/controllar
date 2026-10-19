@@ -112,11 +112,11 @@ impl Config {
     }
 
     pub fn upsert_paired(&mut self, device: PairedDevice) {
-        if let Some(existing) = self.paired_devices.iter_mut().find(|d| d.id == device.id) {
-            *existing = device;
-        } else {
-            self.paired_devices.push(device);
-        }
+        // Replace *all* entries with this id: an older version could push
+        // duplicates on every reconnect, and this heals such configs.
+        let id = device.id.clone();
+        self.paired_devices.retain(|d| d.id != id);
+        self.paired_devices.push(device);
     }
 
     pub fn forget_paired(&mut self, device_id: &str) -> bool {

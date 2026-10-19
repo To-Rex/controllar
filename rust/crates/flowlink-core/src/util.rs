@@ -63,6 +63,26 @@ pub fn preferred_lan_addr() -> Option<String> {
     local_addrs().into_iter().next()
 }
 
+/// When `host` is an IPv4 literal that shares no `/24` with any local
+/// address, the two computers are almost certainly on different networks
+/// (e.g. the Mac on a range extender's subnet and the PC on the main
+/// router's). Returns a user-facing hint in that case.
+pub fn subnet_mismatch_hint(host: &str, local: &[String]) -> Option<String> {
+    let target: std::net::Ipv4Addr = host.parse().ok()?;
+    let target_net = u32::from(target) & 0xFFFF_FF00;
+    let same_subnet = local
+        .iter()
+        .filter_map(|addr| addr.parse::<std::net::Ipv4Addr>().ok())
+        .any(|ip| u32::from(ip) & 0xFFFF_FF00 == target_net);
+    if same_subnet {
+        return None;
+    }
+    let local_show = local.first().map(String::as_str).unwrap_or("unknown");
+    Some(format!(
+        "the server address {host} is not on this computer's network ({local_show}) — connect both computers to the same router/network"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +96,18 @@ mod tests {
     #[test]
     fn hostname_is_not_empty() {
         assert!(!hostname().trim().is_empty());
+    }
+
+    #[test]
+    fn subnet_mismatch_is_detected() {
+        let local = vec!["192.168.33.104".to_string(), "127.0.0.1".to_string()];
+        // Same /24 → no hint.
+        assert!(subnet_mismatch_hint("192.168.33.7", &local).is_none());
+        // Different /24 → hint mentioning both networks.
+        let hint = subnet_mismatch_hint("192.168.1.108", &local).expect("hint");
+        assert!(hint.contains("192.168.1.108"));
+        assert!(hint.contains("192.168.33.104"));
+        // Non-literal hosts are ignored (DNS names, IPv6).
+        assert!(subnet_mismatch_hint("flowlink.local", &local).is_none());
     }
 }

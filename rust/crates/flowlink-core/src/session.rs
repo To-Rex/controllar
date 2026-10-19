@@ -377,8 +377,14 @@ pub async fn client_loop(engine: Arc<Engine>, cancel: CancellationToken) {
             }
             Ok(SessionOutcome::Cancelled) => return,
             Err(err) => {
-                tracing::warn!("connect attempt failed: {err:#}");
-                engine.set_error(ConnState::Reconnecting, format!("{err:#}"));
+                let mut message = format!("{err:#}");
+                if let Some(hint) =
+                    crate::util::subnet_mismatch_hint(&target.host, &crate::util::local_addrs())
+                {
+                    message = format!("{message} — {hint}");
+                }
+                tracing::warn!("connect attempt failed: {message}");
+                engine.set_error(ConnState::Reconnecting, message);
             }
         }
 

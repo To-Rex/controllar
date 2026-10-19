@@ -60,14 +60,7 @@ public final class AppModel: ObservableObject {
                 // next runloop turn (values are updated by then) and tell the
                 // core whether local capture is actually live.
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    if !self.tapRunning, self.permissions.allGranted, let tap = self.tap {
-                        self.tapRunning = tap.start()
-                    }
-                    self.bridge.setInputCapture(
-                        active: self.tapRunning,
-                        reason: self.tapRunning ? nil : self.captureInactiveReason()
-                    )
+                    self?.installTap()
                 }
             }
             .store(in: &cancellables)
@@ -83,6 +76,38 @@ public final class AppModel: ObservableObject {
             return "Input Monitoring permission is missing — System Settings → Privacy & Security → Input Monitoring → FlowLink: toggle it off and on again after every update."
         }
         return "the macOS event tap could not be created — re-grant Accessibility to FlowLink, then quit and reopen the app."
+    }
+
+    private var tapRetryScheduled = false
+
+    /// Install the event tap, retrying once after a short delay. Right after
+    /// a relaunch the system may still hold the previous instance's tap slot,
+    /// so a first failure is usually transient — the user is only told once
+    /// the retry has failed too.
+    private func installTap() {
+        if tapRunning { return }
+        guard permissions.allGranted, let tap else {
+            bridge.setInputCapture(active: false, reason: captureInactiveReason())
+            return
+        }
+        tapRunning = tap.start()
+        if tapRunning {
+            bridge.setInputCapture(active: true, reason: nil)
+            return
+        }
+        guard !tapRetryScheduled else { return }
+        tapRetryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.tapRetryScheduled = false
+            if !self.tapRunning, let tap = self.tap, tap.start() {
+                self.tapRunning = true
+            }
+            self.bridge.setInputCapture(
+                active: self.tapRunning,
+                reason: self.tapRunning ? nil : self.captureInactiveReason()
+            )
+        }
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -111,11 +136,7 @@ public final class AppModel: ObservableObject {
             self?.bridge.sendInput(input)
         }
         self.tap = tap
-        tapRunning = tap.start()
-        bridge.setInputCapture(
-            active: tapRunning,
-            reason: tapRunning ? nil : captureInactiveReason()
-        )
+        installTap()
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -168,13 +189,7 @@ public final class AppModel: ObservableObject {
         }
 
         // Retry installing the tap once permissions are available.
-        if !tapRunning, permissions.allGranted, let tap {
-            tapRunning = tap.start()
-        }
-        bridge.setInputCapture(
-            active: tapRunning,
-            reason: tapRunning ? nil : captureInactiveReason()
-        )
+        installTap()
 
         // The physical cursor is hidden while this side's input is forwarded
         // to the other computer; it reappears when focus comes back.

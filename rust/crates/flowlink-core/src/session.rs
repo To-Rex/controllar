@@ -25,8 +25,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long the client waits while the user fetches the pairing code.
 const PAIR_WINDOW: Duration = Duration::from_secs(300);
-/// No inbound frame for this long ⇒ connection considered dead.
-const DEAD_AFTER: Duration = Duration::from_secs(6);
+/// How long a session may stay silent before it is declared lost.
+///
+/// Deliberately generous: on a Wi-Fi link, TCP retransmission backoff can
+/// stall the data flow for many seconds without the connection being dead.
+/// Real failures (app closed, cable pulled) are detected instantly by the
+/// read error, so this timer only needs to catch genuinely silent deaths.
+const DEAD_AFTER: Duration = Duration::from_secs(30);
 /// Heartbeat period.
 const HEARTBEAT: Duration = Duration::from_millis(1000);
 
@@ -183,8 +188,18 @@ async fn run_server_session(
     let mut reader = FrameReader::new(read_half);
     let mut writer = write_half;
 
-    let result =
-        server_session_with(engine.clone(), &mut reader, &mut writer, peer, cancel).await;
+    // A fresh token per session: the loop-level `cancel` is shared by every
+    // session, but a reconnect must be able to end just this one.
+    let session_cancel = CancellationToken::new();
+    let result = server_session_with(
+        engine.clone(),
+        &mut reader,
+        &mut writer,
+        peer,
+        cancel,
+        session_cancel,
+    )
+    .await;
     // Handshake-level failures never reach the pump, so explain them here:
     // the peer logs the reason instead of "peer closed connection without
     // sending TLS close_notify", which made every teardown look like a crash.
@@ -201,6 +216,7 @@ async fn server_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     writer: &mut W,
     peer: std::net::SocketAddr,
     cancel: CancellationToken,
+    session_cancel: CancellationToken,
 ) -> Result<()> {
     let hello = match read_message_timeout(reader, HANDSHAKE_TIMEOUT).await {
         Ok(Message::Hello(hello)) => hello,
@@ -379,17 +395,13 @@ async fn server_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
     // ---- Ready ---------------------------------------------------------
     let (tx, rx) = mpsc::unbounded_channel();
-    if !engine.register_session(Mode::Server, &hello.device_id, tx) {
-        let _ = send(
-            writer,
-            &Message::Bye {
-                reason: "busy".into(),
-            },
-        )
-        .await;
-        return Ok(());
-    }
-    let guard = SessionGuard::new(engine.clone());
+    // Registers unconditionally: a reconnect arriving while the previous
+    // session is still tearing down replaces it (and cancels it) instead of
+    // being rejected with "server is busy", which used to block every
+    // reconnect after a network dropout.
+    let session_id =
+        engine.register_session(Mode::Server, &hello.device_id, tx, session_cancel.clone());
+    let guard = SessionGuard::new(engine.clone(), session_id);
     engine.set_connected_peer(
         &hello.device_id,
         &hello.name,
@@ -403,9 +415,18 @@ async fn server_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     engine.notice("connected", &format!("{} is connected", hello.name));
     engine.on_session_ready(Mode::Server);
 
-    let result = pump(engine.clone(), reader, writer, rx, cancel, Mode::Server).await;
+    let result = pump(
+        engine.clone(),
+        reader,
+        writer,
+        rx,
+        cancel,
+        session_cancel,
+        Mode::Server,
+    )
+    .await;
     drop(guard);
-    engine.on_server_session_ended();
+    engine.on_server_session_ended(session_id);
     result.map(|_| ())
 }
 
@@ -498,6 +519,9 @@ async fn run_client_session(
     let mut reader = FrameReader::new(read_half);
     let mut writer = write_half;
 
+    // A fresh token per session (see the server side for why the loop-level
+    // token cannot double as a per-session kill switch).
+    let session_cancel = CancellationToken::new();
     let result = client_session_with(
         engine.clone(),
         &mut reader,
@@ -505,6 +529,7 @@ async fn run_client_session(
         target,
         presented,
         cancel,
+        session_cancel,
     )
     .await;
     // Handshake-level failures never reach the pump: tell the server why we
@@ -523,6 +548,7 @@ async fn client_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     target: &ClientTarget,
     presented: Option<String>,
     cancel: CancellationToken,
+    session_cancel: CancellationToken,
 ) -> Result<SessionOutcome> {
     engine.set_state(ConnState::Handshake);
 
@@ -616,10 +642,9 @@ async fn client_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
     // ---- Ready -----------------------------------------------------------
     let (tx, rx) = mpsc::unbounded_channel();
-    if !engine.register_session(Mode::Client, &ack.device_id, tx) {
-        return Err(anyhow!("another session is already active"));
-    }
-    let guard = SessionGuard::new(engine.clone());
+    let session_id =
+        engine.register_session(Mode::Client, &ack.device_id, tx, session_cancel.clone());
+    let guard = SessionGuard::new(engine.clone(), session_id);
     if let Some(token) = &token_used {
         engine.save_server_token(&ack.device_id, &ack.name, token, &target.host);
     }
@@ -636,9 +661,18 @@ async fn client_session_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     engine.notice("connected", &format!("connected to {}", ack.name));
     engine.on_session_ready(Mode::Client);
 
-    let result = pump(engine.clone(), reader, writer, rx, cancel, Mode::Client).await;
+    let result = pump(
+        engine.clone(),
+        reader,
+        writer,
+        rx,
+        cancel,
+        session_cancel,
+        Mode::Client,
+    )
+    .await;
     drop(guard);
-    engine.on_client_session_ended();
+    engine.on_client_session_ended(session_id);
     result
 }
 
@@ -741,6 +775,7 @@ async fn pump<R, W>(
     writer: &mut W,
     mut rx: mpsc::UnboundedReceiver<Message>,
     cancel: CancellationToken,
+    session_cancel: CancellationToken,
     role: Mode,
 ) -> Result<SessionOutcome>
 where
@@ -761,7 +796,16 @@ where
         }
     });
 
-    let result = pump_loop(&engine, reader, writer, &mut rx, &cancel, &handler_tx).await;
+    let result = pump_loop(
+        &engine,
+        reader,
+        writer,
+        &mut rx,
+        &cancel,
+        &session_cancel,
+        &handler_tx,
+    )
+    .await;
     drop(handler_tx);
     handler.abort();
 
@@ -786,6 +830,7 @@ async fn pump_loop<R, W>(
     writer: &mut W,
     rx: &mut mpsc::UnboundedReceiver<Message>,
     cancel: &CancellationToken,
+    session_cancel: &CancellationToken,
     handler_tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<SessionOutcome>
 where
@@ -803,6 +848,12 @@ where
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                return Ok(SessionOutcome::Cancelled);
+            }
+            // This session was replaced by a newer connection (reconnect
+            // arrived before the teardown finished): exit without touching
+            // the shared state the newcomer now owns.
+            _ = session_cancel.cancelled() => {
                 return Ok(SessionOutcome::Cancelled);
             }
             // FrameReader keeps partial reads in the reader, so this branch
@@ -952,17 +1003,18 @@ async fn write_outbound<W: AsyncWrite + Unpin>(writer: &mut W, msg: &Message) ->
 /// Ensures the session slot is released however the session task exits.
 struct SessionGuard {
     engine: Arc<Engine>,
+    id: u64,
 }
 
 impl SessionGuard {
-    fn new(engine: Arc<Engine>) -> Self {
-        SessionGuard { engine }
+    fn new(engine: Arc<Engine>, id: u64) -> Self {
+        SessionGuard { engine, id }
     }
 }
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        self.engine.deregister_session();
+        self.engine.deregister_session(self.id);
     }
 }
 

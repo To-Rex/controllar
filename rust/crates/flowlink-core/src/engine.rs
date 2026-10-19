@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,6 +84,12 @@ pub struct SessionSlot {
     pub role: Mode,
     pub device_id: String,
     pub tx: UnboundedSender<Message>,
+    /// Unique per registration; a session's teardown only touches state it
+    /// still owns (a reconnect may already have replaced the slot).
+    pub id: u64,
+    /// Cancelling this token ends just this session (the loop-level cancel
+    /// token is shared by every session, so it cannot be used for this).
+    pub cancel: CancellationToken,
 }
 
 struct RunHandle {
@@ -133,6 +139,11 @@ pub struct Engine {
     /// `Some(reason)` while the shell's local input source (macOS event tap /
     /// Windows hook) is not capturing, as reported by the platform shell.
     input_capture: Mutex<Option<String>>,
+    /// True when this side owned the shared cursor the last time a client
+    /// session ended. On the next session the client re-takes the cursor so a
+    /// reconnect never snaps it to the other screen.
+    restore_focus: AtomicBool,
+    next_session_id: AtomicU64,
     /// The port the listener is actually bound to (0 = not bound); differs
     /// from the configured port when that one was busy and we fell back.
     pub actual_port: Mutex<u16>,
@@ -187,6 +198,8 @@ impl Engine {
             input_seen: AtomicBool::new(false),
             input_ignored_at: Mutex::new(None),
             input_capture: Mutex::new(None),
+            restore_focus: AtomicBool::new(false),
+            next_session_id: AtomicU64::new(1),
             actual_port: Mutex::new(0),
             cmd_tx,
             identity,
@@ -645,7 +658,7 @@ impl Engine {
                 }
             });
         }
-        self.deregister_session();
+        self.clear_session();
         *self.pending_pair_code.lock() = None;
         self.set_actual_port(0);
         {
@@ -1021,25 +1034,52 @@ impl Engine {
 
     /// Register the outbound channel of a ready session. Returns false when
     /// another session is already live (server is single-client by design).
+    /// Register a live session, replacing any stale one.
+    ///
+    /// A replacement happens when a peer reconnects while its previous
+    /// session has not finished tearing down (e.g. the old connection died
+    /// during a network dropout and the dead-man timer has not fired yet).
+    /// Rejecting the newcomer would make every reconnect hit a "server is
+    /// busy" window, so instead the old session is cancelled and the new one
+    /// takes over immediately.
     pub fn register_session(
         &self,
         role: Mode,
         device_id: &str,
         tx: UnboundedSender<Message>,
-    ) -> bool {
+        cancel: CancellationToken,
+    ) -> u64 {
+        let id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let mut slot = self.session.lock();
-        if slot.is_some() {
-            return false;
+        if let Some(old) = slot.take() {
+            tracing::warn!(
+                old_device = %old.device_id,
+                new_device = device_id,
+                "replacing a stale session with the new connection"
+            );
+            old.cancel.cancel();
         }
         *slot = Some(SessionSlot {
             role,
             device_id: device_id.to_string(),
             tx,
+            id,
+            cancel,
         });
-        true
+        id
     }
 
-    pub fn deregister_session(&self) {
+    /// Release the session slot, but only if it still belongs to `id` — a
+    /// newer session may have replaced it already.
+    pub fn deregister_session(&self, id: u64) {
+        let mut slot = self.session.lock();
+        if slot.as_ref().is_some_and(|s| s.id == id) {
+            *slot = None;
+        }
+    }
+
+    /// Unconditional clear, used only when the engine itself stops.
+    pub fn clear_session(&self) {
         *self.session.lock() = None;
     }
 
@@ -1102,6 +1142,12 @@ impl Engine {
             // transition, so start the move flusher explicitly.
             *self.focus_edge.lock() = None;
             self.start_flusher();
+            // The cursor was here when the last session ended: take it back
+            // immediately so a reconnect never snaps it to the other screen.
+            if self.restore_focus.swap(false, Ordering::Relaxed) {
+                tracing::info!("reconnected — restoring the cursor to this screen");
+                self.take_focus();
+            }
         }
         self.notify();
     }
@@ -1351,7 +1397,17 @@ impl Engine {
     }
 
     /// Server role: session ended — return to listening.
-    pub fn on_server_session_ended(self: &Arc<Self>) {
+    pub fn on_server_session_ended(self: &Arc<Self>, session_id: u64) {
+        // A reconnect may have replaced this session already; its teardown
+        // must not clobber the new session's state.
+        if self
+            .session
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.id != session_id)
+        {
+            return;
+        }
         self.set_focused(false);
         *self.focus_edge.lock() = None;
         {
@@ -1368,7 +1424,21 @@ impl Engine {
     }
 
     /// Client role: session ended — clear local focus state.
-    pub fn on_client_session_ended(self: &Arc<Self>) {
+    pub fn on_client_session_ended(self: &Arc<Self>, session_id: u64) {
+        // A newer session may have replaced this one already; skip the
+        // teardown in that case.
+        if self
+            .session
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.id != session_id)
+        {
+            return;
+        }
+        // Remember whether this side owned the shared cursor, so the next
+        // session can restore it instead of snapping it to the server.
+        self.restore_focus
+            .store(self.focused.load(Ordering::Relaxed), Ordering::Relaxed);
         self.set_focused(false);
         *self.focus_edge.lock() = None;
         {

@@ -72,9 +72,11 @@ impl EdgeTracker {
 
         let on_edge = match edge {
             Edge::Left => x_px <= 0.5,
-            Edge::Right => x_px >= screen.width - 0.5,
+            // The cursor's last pixel column is width-1, so the threshold is
+            // width-1.0 (not width-0.5, which integer positions can't reach).
+            Edge::Right => x_px >= screen.width - 1.0,
             Edge::Top => y_px <= 0.5,
-            Edge::Bottom => y_px >= screen.height - 0.5,
+            Edge::Bottom => y_px >= screen.height - 1.0,
         };
         let pushing = match edge {
             Edge::Left => dx < -PUSH_EPSILON_PX,

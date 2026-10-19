@@ -990,6 +990,10 @@ impl Engine {
             // Fresh session with the pointer at a normal position: the edge
             // tracker may fire immediately (no warp happened).
             *self.edge_tracker.lock() = EdgeTracker::new();
+        } else {
+            // The client starts in the forwarding state without a focus
+            // transition, so start the move flusher explicitly.
+            self.start_flusher();
         }
         self.notify();
     }

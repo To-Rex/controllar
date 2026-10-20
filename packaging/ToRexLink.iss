@@ -1,6 +1,6 @@
 ; Optional Inno Setup 6 installer for the portable PyInstaller build.
 #define MyAppName "ToRexLink"
-#define MyAppVersion "1.0.10"
+#define MyAppVersion "1.0.11"
 #define MyAppPublisher "ToRexLink"
 #define MyAppExeName "ToRexLink.exe"
 

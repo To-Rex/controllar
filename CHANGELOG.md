@@ -4,6 +4,21 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.11] — 2026-10-21
+
+### Fixed
+
+- Fokus lokal kompyuterga qaytganda kursor **chetda qolib**, keyingi kichik
+  harakatda yana peer’ga sakrashi mumkin edi. Endi har lokal fokusda kursor
+  chetdan **24 px ichkariga** qaytariladi va edge qayta qurollantirilmaydi.
+- `force_cursor_visible()` hide-depth’ni hisobga olmay bitta ShowCursor
+  chaqirardi; depth 2+ bo‘lsa kursor yashirin qolardi. Endi har bir hide uchun
+  show bajariladi.
+- Fizik event paytida `_associated`/visibility nomuvofiqligi aniqlansa,
+  pointer association va cursor ko‘rinishi avtomatik tiklanadi.
+- `set_pointer_frozen(False)` endi har doim `CGAssociate(true)` chaqiradi;
+  flag nomuvofiqligi kursorni qotirib qo‘ymaydi.
+
 ## [1.0.10] — 2026-10-21
 
 ### Fixed

@@ -125,9 +125,11 @@ class InputBridge:
             self._remote_return_armed = False
             self._remote_return_push = 0.0
             if controller == self.self_id and target == self.self_id:
-                # After an edge/remote return, require the user to move the
-                # pointer away from the exit edge before it can trigger again.
-                self._edge_armed = reason != "remote-return"
+                # Every transition back to local must move the pointer into the
+                # screen before it can cross the same edge again. Otherwise a
+                # cursor restored at the edge immediately bounces back to the
+                # peer on the next pixel of movement.
+                self._edge_armed = reason in {"initial", "startup"}
             if controller == self.peer_id and target == self.self_id:
                 self._receiving_since = time.monotonic()
         try:
@@ -171,10 +173,12 @@ class InputBridge:
                 self._set_cursor_visible(True)
                 if previous[0] == self.peer_id or previous[1] == self.peer_id:
                     self.backend.release_injected_keys()
-                if reason == "remote-return" and previous[0] == self.peer_id:
+                if previous[0] != self.self_id or previous[1] != self.self_id:
                     self._restore_pointer(inset=True)
-                elif not (previous[0] == self.self_id and previous[1] == self.self_id):
-                    self._restore_pointer(inset=False)
+                force_visible = getattr(self.backend, "force_cursor_visible", None)
+                if force_visible is not None:
+                    with contextlib.suppress(Exception):
+                        force_visible()
             else:
                 # This machine is idle while the peer uses its own local
                 # input. Hide and freeze its pointer too, otherwise both

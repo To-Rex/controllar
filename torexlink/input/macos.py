@@ -336,6 +336,21 @@ class MacOSInputBackend:
                 return event
             if self._is_injected(event):
                 return event
+            # Self-heal a missed focus transition: on a physical event while
+            # the pointer is not frozen, the cursor must be associated and
+            # visible. This is deliberately checked on the event path as well
+            # as in apply_focus so a race cannot leave the user with a frozen
+            # mouse after returning to this computer.
+            with self._lock:
+                frozen = self._pointer_frozen
+                associated = self._associated
+                hidden = self._cursor_hidden
+            if not frozen and not associated:
+                log.warning("Self-healing missing pointer association")
+                self._associate(True)
+            elif not frozen and hidden:
+                log.warning("Self-healing hidden cursor on local focus")
+                self.force_cursor_visible()
             decoded = self._decode_event(event_type, event)
             if decoded is None:
                 return event
@@ -729,8 +744,12 @@ class MacOSInputBackend:
 
     def _associate(self, associated: bool) -> None:
         if associated:
-            with contextlib.suppress(Exception):
+            try:
                 Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+            except Exception:  # noqa: BLE001
+                log.warning("Could not restore macOS pointer association", exc_info=True)
+            if not self._associated:
+                log.info("macOS pointer association restored")
             self._associated = True
             self._stop_watchdog()
             return
@@ -741,6 +760,7 @@ class MacOSInputBackend:
                 self._associate(True)
                 return
             self._associated = False
+            log.info("macOS pointer disassociated for forwarding")
 
     def set_pointer_frozen(self, frozen: bool) -> None:
         """Freeze the local pointer; disassociate physical motion while frozen.
@@ -754,8 +774,10 @@ class MacOSInputBackend:
         with self._lock:
             self._pointer_frozen = frozen
             if not frozen:
-                if not self._associated:
-                    self._associate(True)
+                # Always call through, even if the flag claims we are already
+                # associated. A mismatched flag used to leave the cursor frozen
+                # after remote-return.
+                self._associate(True)
                 return
             self._frozen_center = self.pointer_position()
             self._last_physical_pointer = (
@@ -829,6 +851,21 @@ class MacOSInputBackend:
                     log.warning("CGDisplayHideCursor failed with CGError %s", error)
                 self._cursor_hide_depth = max(1, self._cursor_hide_depth + 1)
                 self._cursor_hidden = True
+
+    def force_cursor_visible(self) -> None:
+        """Force the pointer visible after returning from forwarding.
+
+        CGDisplayHideCursor is reference counted. Balanced every defensive
+        hide by calling ShowCursor at least once per tracked hide, otherwise a
+        depth of 2+ leaves the cursor invisible after remote-return.
+        """
+        with self._lock:
+            depth = max(1, self._cursor_hide_depth)
+            for _ in range(depth):
+                with contextlib.suppress(Exception):
+                    Quartz.CGDisplayShowCursor(Quartz.CGMainDisplayID())
+            self._cursor_hide_depth = 0
+            self._cursor_hidden = False
 
     def force_cursor_hidden(self) -> None:
         """Hide even when the tracked state says the cursor is already hidden.

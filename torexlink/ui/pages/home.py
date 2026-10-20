@@ -85,6 +85,10 @@ class HomePage(QWidget):
         super().__init__(parent)
         self.controller = controller
         self._snapshot: ServiceSnapshot = controller.snapshot
+        self._panel_signature: tuple | None = None
+        self._peers_signature: tuple | None = None
+        self._nearby_signature: tuple | None = None
+        self._cta_mode: str = ""
         self._build()
         self._wire()
         self.refresh(self._snapshot)
@@ -259,25 +263,7 @@ class HomePage(QWidget):
         lists.addWidget(nearby_card, 1)
         self.layout.addLayout(lists)
 
-        # Feature strip
-        features = QHBoxLayout()
-        features.setSpacing(14)
-        for icon_name, title_key, desc_key, color_value in (
-            ("lock", "home_feature_secure_title", "home_feature_secure_desc", ACCENT),
-            ("pulse", "home_feature_fast_title", "home_feature_fast_desc", MINT),
-            ("switch", "home_feature_smart_title", "home_feature_smart_desc", AMBER),
-        ):
-            card = Card(margins=(16, 14, 16, 14), spacing=7)
-            tile = IconTile(icon_name, color_name=color_value, size=32, icon_size=16)
-            card.body.addWidget(tile)
-            title = label(object_name="SectionTitle")
-            desc = label(object_name="SectionCaption", wrap=True)
-            card.body.addWidget(title)
-            card.body.addWidget(desc)
-            setattr(self, f"feature_{title_key}", title)
-            setattr(self, f"feature_{desc_key}", desc)
-            features.addWidget(card, 1)
-        self.layout.addLayout(features)
+        # Keep the landing page focused on live state and actions.
         self.layout.addStretch(1)
 
     def _info_card(self, icon_name: str, *, copyable: bool = False):
@@ -342,14 +328,11 @@ class HomePage(QWidget):
         self.security_title.setText(t("home_security_title"))
         self.clipboard_title.setText(t("home_clipboard_title"))
         self.security_meta.setText(t("home_security_desc"))
-        self.feature_home_feature_secure_title.setText(t("home_feature_secure_title"))
-        self.feature_home_feature_secure_desc.setText(t("home_feature_secure_desc"))
-        self.feature_home_feature_fast_title.setText(t("home_feature_fast_title"))
-        self.feature_home_feature_fast_desc.setText(t("home_feature_fast_desc"))
-        self.feature_home_feature_smart_title.setText(t("home_feature_smart_title"))
-        self.feature_home_feature_smart_desc.setText(t("home_feature_smart_desc"))
         self.peers_title.setText(t("home_peers_title"))
         self.nearby_title.setText(t("home_discovered_title"))
+        self._panel_signature = None
+        self._peers_signature = None
+        self._nearby_signature = None
         self.refresh(self._snapshot)
 
     # ------------------------------------------------------------------ refresh
@@ -398,8 +381,13 @@ class HomePage(QWidget):
             self.secondary_button.setText(t("home_connect_cta"))
         from ..icons import icon as svg_icon
 
-        self.pair_button.setIcon(svg_icon("power" if snapshot.status == "connected" else "plus", "#2C2371", 16))
-        self.secondary_button.setIcon(svg_icon("devices", "#FFFFFF", 16))
+        cta_mode = "connected" if snapshot.status == "connected" else "idle"
+        if cta_mode != self._cta_mode:
+            self.pair_button.setIcon(
+                svg_icon("power" if cta_mode == "connected" else "plus", "#2C2371", 16)
+            )
+            self.secondary_button.setIcon(svg_icon("devices", "#FFFFFF", 16))
+            self._cta_mode = cta_mode
 
         local = snapshot.local
         if local:
@@ -424,9 +412,32 @@ class HomePage(QWidget):
 
     def _render_peer_panel(self, snapshot: ServiceSnapshot) -> None:
         t = self.controller.translator.t
+        connection = snapshot.connection
+        focus = snapshot.focus
+        signature = (
+            self.controller.translator.locale,
+            snapshot.status,
+            connection.peer_id if connection else None,
+            connection.name if connection else None,
+            connection.platform if connection else None,
+            connection.app_version if connection else None,
+            connection.role if connection else None,
+            connection.latency_ms if connection else None,
+            focus.local_controller if focus else None,
+            focus.local_target if focus else None,
+            focus.controller_name if focus else None,
+            focus.target_name if focus else None,
+        )
+        if signature == self._panel_signature:
+            return
+        self._panel_signature = signature
         while self.peer_content_layout.count():
             item = self.peer_content_layout.takeAt(0)
             if item and item.widget():
+                # Hide synchronously; deleteLater alone can leave the old
+                # labels painted over the new row for one frame.
+                item.widget().hide()
+                item.widget().setParent(None)
                 item.widget().deleteLater()
         connection = snapshot.connection
         if connection is None:
@@ -494,6 +505,10 @@ class HomePage(QWidget):
         self.details_button.setVisible(True)
 
     def _render_peers(self, peers: tuple[PeerView, ...]) -> None:
+        signature = (self.controller.translator.locale, peers)
+        if signature == self._peers_signature:
+            return
+        self._peers_signature = signature
         t = self.controller.translator.t
         self._clear(self.peers_container)
         if not peers:
@@ -527,6 +542,10 @@ class HomePage(QWidget):
             self.peers_container.addWidget(row)
 
     def _render_nearby(self, devices) -> None:
+        signature = (self.controller.translator.locale, tuple(devices))
+        if signature == self._nearby_signature:
+            return
+        self._nearby_signature = signature
         t = self.controller.translator.t
         self._clear(self.nearby_container)
         if not devices:
@@ -557,6 +576,8 @@ class HomePage(QWidget):
         while layout.count():
             item = layout.takeAt(0)
             if item and item.widget():
+                item.widget().hide()
+                item.widget().setParent(None)
                 item.widget().deleteLater()
 
 

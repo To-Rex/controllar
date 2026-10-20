@@ -8,6 +8,7 @@ import pytest
 from torexlink.constants import MAX_FRAME_BYTES
 from torexlink.protocol.framing import FrameError, FrameTooLarge, read_frame, write_frame
 from torexlink.protocol.models import ProtocolError, validate_peer_message
+from torexlink.util import version_at_least
 
 
 async def _roundtrip(payload: dict) -> dict:
@@ -127,3 +128,11 @@ def test_log_exchange_message_validation() -> None:
     ):
         with pytest.raises(ProtocolError):
             validate_peer_message(broken)
+
+
+def test_version_at_least_for_remote_log_compatibility() -> None:
+    assert version_at_least("1.0.5", "1.0.5")
+    assert version_at_least("1.0.6", "1.0.5")
+    assert version_at_least("1.1", "1.0.5")
+    assert not version_at_least("1.0.4", "1.0.5")
+    assert not version_at_least("", "1.0.5")

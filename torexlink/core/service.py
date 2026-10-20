@@ -30,6 +30,7 @@ from ..constants import (
     LOG_SHARE_TIMEOUT_SECONDS,
     RECONNECT_DELAYS,
     RECONNECT_JITTER,
+    REMOTE_LOGS_MIN_VERSION,
 )
 from ..input.base import InputBackend
 from ..input.bridge import InputBridge, InputBridgeCallbacks
@@ -48,7 +49,7 @@ from ..protocol.handshake import (
 from ..protocol.models import ProtocolError
 from ..security.identity import Identity, short_fingerprint
 from ..settings import Settings, SettingsStore
-from ..util import atomic_write_text, backoff_delay, iso_now
+from ..util import atomic_write_text, backoff_delay, iso_now, version_at_least
 from .auth import AuthenticatedLink, ReconnectAuthError, client_auth_exchange, server_auth_exchange
 from .clipboard import ClipboardSync, NativeClipboard, create_native_clipboard
 from .discovery import DiscoveredDevice, DiscoveryService, local_ipv4_addresses
@@ -691,7 +692,7 @@ class ToRexLinkService:
         active = self._active
         if active is None or active.session.closed:
             raise ServiceError("not_connected")
-        if active.app_version != APP_VERSION:
+        if not version_at_least(active.app_version, REMOTE_LOGS_MIN_VERSION):
             raise ServiceError("peer_unsupported")
         if max_bytes < 1024 or max_bytes > LOG_SHARE_MAX_BYTES:
             raise ServiceError("invalid_request")
@@ -817,6 +818,16 @@ class ToRexLinkService:
 
     def _record_auth_failure(self, ip: str) -> None:
         now = time.monotonic()
+        # Bound the per-IP failure map on a long-lived host.
+        if len(self._auth_failures) > 256 and ip not in self._auth_failures:
+            stale = [
+                address
+                for address, timestamps in self._auth_failures.items()
+                if not timestamps or now - timestamps[-1] > 60
+            ]
+            for address in stale[:128]:
+                self._auth_failures.pop(address, None)
+                self._auth_blocked_until.pop(address, None)
         failures = self._auth_failures.setdefault(ip, deque(maxlen=12))
         while failures and now - failures[0] > 60:
             failures.popleft()
@@ -1709,7 +1720,7 @@ class ToRexLinkService:
             name=self.local_name,
             platform=self.local_platform,
             fingerprint=self._identity.fingerprint,
-            addresses=self._address_provider(),
+            addresses=self._network_addresses,
             hosting_port=self._server.port if self._server else None,
         )
 

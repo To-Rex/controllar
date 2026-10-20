@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import json
 import logging
+import threading
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -70,6 +70,9 @@ class PeerSession:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._input_flush_task: asyncio.Task[None] | None = None
         self._input_queue: deque[_QueuedInput] = deque()
+        self._native_events: deque[dict[str, Any]] = deque()
+        self._native_lock = threading.Lock()
+        self._native_flush_scheduled = False
         self._input_seq = 0
         self._last_received = time.monotonic()
         self._ping_id = 0
@@ -120,8 +123,7 @@ class PeerSession:
         if self._closed:
             raise TransportError("session is closed")
         try:
-            await self.stream.send(payload)
-            self._bytes_sent += _estimated_size(payload)
+            self._bytes_sent += await self.stream.send(payload)
         except (OSError, ConnectionError, TransportError) as exc:
             await self._terminate("write_error")
             raise TransportError("connection write failed") from exc
@@ -202,14 +204,37 @@ class PeerSession:
         )
 
     def post_input_threadsafe(self, event: dict[str, Any]) -> None:
-        """Called from the native input thread; never blocks the event tap/hook."""
+        """Queue a native event without a loop callback for every single event.
+
+        At 1000 Hz, call_soon_threadsafe() itself becomes measurable overhead.
+        A short thread-safe burst buffer lets the loop drain many hardware
+        events in one callback while preserving order and low latency.
+        """
         if self._closed:
             return
+        with self._native_lock:
+            if len(self._native_events) >= 16384:
+                self._native_events.popleft()
+            self._native_events.append(event)
+            if self._native_flush_scheduled:
+                return
+            self._native_flush_scheduled = True
         try:
-            self.loop.call_soon_threadsafe(self._enqueue_input, event)
+            self.loop.call_soon_threadsafe(self._drain_native_events)
         except RuntimeError:
-            # Event loop is shutting down.
-            pass
+            with self._native_lock:
+                self._native_flush_scheduled = False
+                self._native_events.clear()
+
+    def _drain_native_events(self) -> None:
+        with self._native_lock:
+            events = list(self._native_events)
+            self._native_events.clear()
+            self._native_flush_scheduled = False
+        if self._closed:
+            return
+        for event in events:
+            self._enqueue_input(event)
 
     def _enqueue_input(self, event: dict[str, Any]) -> None:
         if self._closed:
@@ -262,8 +287,7 @@ class PeerSession:
             while self._input_queue and not self._closed:
                 batch = [self._input_queue.popleft() for _ in range(min(12, len(self._input_queue)))]
                 payloads = [item.payload for item in batch]
-                await self.stream.send_batch(payloads)
-                self._bytes_sent += sum(_estimated_size(payload) for payload in payloads)
+                self._bytes_sent += await self.stream.send_batch(payloads)
                 if self._input_queue:
                     await asyncio.sleep(0)
         except (OSError, ConnectionError, TransportError) as exc:
@@ -312,7 +336,7 @@ class PeerSession:
                     await self._terminate("protocol_error")
                     return
                 self._last_received = time.monotonic()
-                self._bytes_received += _estimated_size(raw)
+                self._bytes_received += self.stream.last_frame_size
                 try:
                     message = validate_peer_message(raw)
                 except ProtocolError as exc:
@@ -421,6 +445,8 @@ class PeerSession:
             return
         self._finalized = True
         self._close_reason = reason
+        with self._native_lock:
+            self._native_events.clear()
         was_open = not self._closed
         self._closed = True
         if notify_peer and was_open:
@@ -441,12 +467,6 @@ class PeerSession:
                 self.callbacks.on_closed(self, reason)
         log.info("Session with %s closed (%s)", self.peer_id[:8], reason)
 
-
-def _estimated_size(payload: dict[str, Any]) -> int:
-    try:
-        return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-    except Exception:  # noqa: BLE001
-        return 0
 
 
 __all__ = ["PeerSession", "SessionCallbacks"]

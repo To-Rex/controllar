@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 5, 0),
-    prodvers=(1, 0, 5, 0),
+    filevers=(1, 0, 6, 0),
+    prodvers=(1, 0, 6, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'ToRexLink'),
           StringStruct('FileDescription', 'ToRexLink secure keyboard and mouse sharing'),
-          StringStruct('FileVersion', '1.0.5.0'),
+          StringStruct('FileVersion', '1.0.6.0'),
           StringStruct('InternalName', 'ToRexLink'),
           StringStruct('LegalCopyright', 'Copyright (c) 2026 ToRexLink'),
           StringStruct('OriginalFilename', 'ToRexLink.exe'),
           StringStruct('ProductName', 'ToRexLink'),
-          StringStruct('ProductVersion', '1.0.5.0')
+          StringStruct('ProductVersion', '1.0.6.0')
         ]
       )
     ]),

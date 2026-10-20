@@ -195,7 +195,7 @@ class ToRexLinkController(QObject):
         return self._permissions.status()
 
     def refresh_permissions(self) -> PermissionInfo:
-        info = self._permissions.status()
+        info = self._permissions.status(force=True)
         self.permissions_changed.emit(info)
         return info
 

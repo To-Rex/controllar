@@ -7,7 +7,7 @@ Never change them without a protocol/format migration.
 from __future__ import annotations
 
 APP_NAME = "ToRexLink"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 APP_BUNDLE_ID = "uz.torexlink.app"
 PROTOCOL_VERSION = 1
 
@@ -82,6 +82,7 @@ LOG_BACKUP_COUNT = 3
 LOG_SHARE_MAX_BYTES = 256 * 1024
 LOG_SHARE_TIMEOUT_SECONDS = 10.0
 LOG_SHARE_COOLDOWN_SECONDS = 2.0
+REMOTE_LOGS_MIN_VERSION = "1.0.5"
 APP_EXIT_TIMEOUT = 6.0
 
 # Limit untrusted network requests

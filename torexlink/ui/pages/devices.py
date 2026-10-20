@@ -108,6 +108,8 @@ class DevicesPage(QWidget):
         super().__init__(parent)
         self.controller = controller
         self._snapshot: ServiceSnapshot = controller.snapshot
+        self._peers_signature: tuple | None = None
+        self._nearby_signature: tuple | None = None
         self._build()
         self.refresh(self._snapshot)
 
@@ -203,6 +205,8 @@ class DevicesPage(QWidget):
         self.nearby_title.setText(t("nearby_devices"))
         self.nearby_action.setText(t("home_see_all"))
         self.nearby_empty.setText(t("no_devices_found"))
+        self._peers_signature = None
+        self._nearby_signature = None
         self.refresh(self._snapshot)
 
     def refresh(self, snapshot: ServiceSnapshot) -> None:
@@ -217,43 +221,52 @@ class DevicesPage(QWidget):
             "error": t("status_error"),
         }.get(snapshot.status, t("status_offline"))
         self.status.set_status(snapshot.status, status_text)
-        while self.rows.count():
-            item = self.rows.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
         peers = snapshot.peers
+        peers_signature = (self.controller.translator.locale, peers)
+        if peers_signature != self._peers_signature:
+            self._peers_signature = peers_signature
+            while self.rows.count():
+                item = self.rows.takeAt(0)
+                if item and item.widget():
+                    item.widget().hide()
+                    item.widget().setParent(None)
+                    item.widget().deleteLater()
+            for peer in peers:
+                card = PeerCard(peer, t)
+                card.connect.connect(self._connect_peer)
+                card.disconnect.connect(self.controller.disconnect)
+                card.remove.connect(self._remove_peer)
+                self.rows.addWidget(card)
         self.count_pill.setText(str(len(peers)))
         self.empty.setVisible(not peers)
-        for peer in peers:
-            card = PeerCard(peer, t)
-            card.connect.connect(self._connect_peer)
-            card.disconnect.connect(self.controller.disconnect)
-            card.remove.connect(self._remove_peer)
-            self.rows.addWidget(card)
         self.auto_note.setVisible(not peers)
-        while self.nearby_rows.count():
-            item = self.nearby_rows.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
         discovered = snapshot.discovered[:4]
-        self.nearby_empty.setVisible(not discovered)
-        for device in discovered:
-            row = QFrame()
-            row.setObjectName("DeviceRow")
-            line = QHBoxLayout(row)
-            line.setContentsMargins(9, 8, 9, 8)
-            line.setSpacing(9)
-            line.addWidget(make_avatar_for_name(device.name))
-            texts = QVBoxLayout()
-            texts.setSpacing(1)
-            texts.addWidget(label(device.name, object_name="DeviceName"))
-            texts.addWidget(label(device.address, object_name="DeviceMeta"))
-            line.addLayout(texts, 1)
-            if device.paired:
-                line.addWidget(Pill(t("device_paired"), "success"))
-            else:
-                line.addWidget(Pill(t("device_new")))
-            self.nearby_rows.addWidget(row)
+        nearby_signature = (self.controller.translator.locale, tuple(discovered))
+        if nearby_signature != self._nearby_signature:
+            self._nearby_signature = nearby_signature
+            while self.nearby_rows.count():
+                item = self.nearby_rows.takeAt(0)
+                if item and item.widget():
+                    item.widget().hide()
+                    item.widget().setParent(None)
+                    item.widget().deleteLater()
+            for device in discovered:
+                row = QFrame()
+                row.setObjectName("DeviceRow")
+                line = QHBoxLayout(row)
+                line.setContentsMargins(9, 8, 9, 8)
+                line.setSpacing(9)
+                line.addWidget(make_avatar_for_name(device.name))
+                texts = QVBoxLayout()
+                texts.setSpacing(1)
+                texts.addWidget(label(device.name, object_name="DeviceName"))
+                texts.addWidget(label(device.address, object_name="DeviceMeta"))
+                line.addLayout(texts, 1)
+                if device.paired:
+                    line.addWidget(Pill(t("device_paired"), "success"))
+                else:
+                    line.addWidget(Pill(t("device_new")))
+                self.nearby_rows.addWidget(row)
 
     def _connect_peer(self, peer_id: str) -> None:
         self.controller.connect_peer(

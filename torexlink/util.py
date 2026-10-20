@@ -134,6 +134,23 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def version_at_least(value: str, minimum: str) -> bool:
+    """Compare simple numeric dotted versions without a packaging dependency."""
+    def parts(text: str) -> tuple[int, ...]:
+        chunks: list[int] = []
+        for chunk in text.strip().split("."):
+            digits = "".join(char for char in chunk if char.isdigit())
+            if not digits:
+                break
+            chunks.append(int(digits))
+        return tuple(chunks)
+
+    left = parts(value)
+    right = parts(minimum)
+    width = max(len(left), len(right))
+    return left + (0,) * (width - len(left)) >= right + (0,) * (width - len(right))
+
+
 __all__ = [
     "atomic_write_bytes",
     "atomic_write_json",
@@ -152,4 +169,5 @@ __all__ = [
     "sha256_hex",
     "utc_now",
     "valid_locale",
+    "version_at_least",
 ]

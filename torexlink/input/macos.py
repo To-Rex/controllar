@@ -167,6 +167,7 @@ class MacOSInputBackend:
     def start(self, callback: Any) -> None:
         if self._started:
             return
+        self._screen_size_at = 0.0
         permissions = self.preflight()
         if not permissions.capture:
             raise InputBackendError(permissions.capture_detail)
@@ -676,21 +677,27 @@ class MacOSInputBackend:
             self._pointer_frozen = frozen
             if frozen:
                 width, height = self.screen_size()
+                self._frozen_center = (width // 2, height // 2)
                 Quartz.CGWarpMouseCursorPosition(
-                    Quartz.CGPointMake(width // 2, height // 2)
+                    Quartz.CGPointMake(self._frozen_center[0], self._frozen_center[1])
                 )
-                self._last_physical_pointer = (float(width // 2), float(height // 2))
+                self._last_physical_pointer = (
+                    float(self._frozen_center[0]),
+                    float(self._frozen_center[1]),
+                )
 
     def freeze_pointer_motion(self) -> None:
         """Undo the cursor motion that OS delivers before tap suppression."""
         with self._lock:
             if not self._pointer_frozen:
                 return
-            width, height = self.screen_size()
             Quartz.CGWarpMouseCursorPosition(
-                Quartz.CGPointMake(width // 2, height // 2)
+                Quartz.CGPointMake(self._frozen_center[0], self._frozen_center[1])
             )
-            self._last_physical_pointer = (float(width // 2), float(height // 2))
+            self._last_physical_pointer = (
+                float(self._frozen_center[0]),
+                float(self._frozen_center[1]),
+            )
 
     def pointer_position(self) -> tuple[int, int]:
         with contextlib.suppress(Exception):
@@ -699,11 +706,20 @@ class MacOSInputBackend:
         return 0, 0
 
     def screen_size(self) -> tuple[int, int]:
+        now = time.monotonic()
+        if self._screen_size_cache[0] > 0 and now - self._screen_size_at < 2.0:
+            return self._screen_size_cache
         try:
             bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
-            return max(1, int(bounds.size.width)), max(1, int(bounds.size.height))
+            size = (
+                max(1, int(bounds.size.width)),
+                max(1, int(bounds.size.height)),
+            )
         except Exception:  # noqa: BLE001
-            return 1920, 1080
+            size = (1920, 1080)
+        self._screen_size_cache = size
+        self._screen_size_at = now
+        return size
 
     def recenter_pointer(self) -> None:
         width, height = self.screen_size()

@@ -111,6 +111,7 @@ class MainWindow(QWidget):
         self._quitting = False
         self._notified_peer: str | None = None
         self._last_focus_signature: tuple | None = None
+        self._dirty_pages: set[str] = set()
         self._tray_notice_shown = False
         self._theme_setting = controller.settings.theme
         self._palette: Palette = palette_for(self._theme_setting)
@@ -328,6 +329,7 @@ class MainWindow(QWidget):
         self.tray.setToolTip("ToRexLink")
         self.tray.activated.connect(self._on_tray_activated)
         self._tray_menu = QMenu()
+        self._tray_menu.aboutToShow.connect(self._rebuild_tray_menu)
         self.tray.setContextMenu(self._tray_menu)
         self.tray.show()
         self._rebuild_tray_menu()
@@ -438,12 +440,8 @@ class MainWindow(QWidget):
         button = self.nav_buttons.get(key)
         if button is not None:
             button.setChecked(True)
-        if key == "logs" and hasattr(page, "refresh"):
-            page.refresh()
-        if key == "diagnostics" and hasattr(page, "refresh"):
-            page.refresh(self._snapshot)
-        if key == "settings" and hasattr(page, "refresh"):
-            page.refresh(self._snapshot)
+        self._refresh_page(key, page, self._snapshot)
+        self._dirty_pages.discard(key)
 
     def _start_pairing_flow(self) -> None:
         self.show_and_raise()
@@ -469,18 +467,43 @@ class MainWindow(QWidget):
 
     def _apply_snapshot(self, snapshot: ServiceSnapshot, event: ServiceEvent | None) -> None:
         self._snapshot = snapshot
-        for key in ("home", "connect", "devices", "settings", "diagnostics"):
-            page = self.pages.get(key)
-            if page is not None and hasattr(page, "refresh"):
-                try:
-                    page.refresh(snapshot)
-                except Exception:  # noqa: BLE001
-                    log.debug("Page refresh failed for %s", key, exc_info=True)
+        current = self.stack.currentWidget()
+        for key, page in self.pages.items():
+            if page is current and self._should_refresh_page(key, event):
+                self._refresh_page(key, page, snapshot)
+                self._dirty_pages.discard(key)
+            elif key != "logs":
+                # Hidden pages are refreshed lazily when opened; rebuilding
+                # every page on each focus/discovery event was both wasteful
+                # and a visible source of UI stutter.
+                self._dirty_pages.add(key)
         self._update_sidebar()
         self._update_focus_banner()
         self._update_window_title()
-        self._rebuild_tray_menu()
+        self._update_tray_tooltip()
         self._previous_snapshot = snapshot
+
+    def _should_refresh_page(self, key: str, event: ServiceEvent | None) -> bool:
+        if event is None:
+            return True
+        if key == "logs":
+            return False
+        if event.kind == "focus":
+            return key == "home"
+        if event.kind in {"clipboard_started", "clipboard_synced", "clipboard_skipped"}:
+            return key == "home"
+        if event.kind == "discovery":
+            return key in {"home", "connect", "devices"}
+        return True
+
+    def _refresh_page(self, key: str, page: object, snapshot: ServiceSnapshot) -> None:
+        try:
+            if key == "logs":
+                page.refresh()  # type: ignore[attr-defined]
+            elif hasattr(page, "refresh"):
+                page.refresh(snapshot)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            log.debug("Page refresh failed for %s", key, exc_info=True)
 
     def _update_sidebar(self) -> None:
         t = self.controller.translator.t
@@ -610,6 +633,30 @@ class MainWindow(QWidget):
             pass
 
     # ------------------------------------------------------------------ tray
+    def _update_tray_tooltip(self) -> None:
+        if self.tray is None:
+            return
+        t = self.controller.translator.t
+        snapshot = self._snapshot
+        status_text = (
+            t("tray_status_connected").format(peer=snapshot.connection.name)
+            if snapshot.connection
+            else t("tray_status_idle")
+        )
+        focus = snapshot.focus
+        focus_text = ""
+        if focus and snapshot.connection:
+            if focus.local_controller and not focus.local_target:
+                focus_text = t("tray_focus_local")
+            elif focus.local_target and not focus.local_controller:
+                focus_text = t("tray_focus_remote").format(peer=focus.controller_name)
+            elif not focus.local_controller and not focus.local_target:
+                focus_text = t("focus_banner_other")
+            elif focus.local_controller and focus.local_target:
+                focus_text = t("tray_focus_local")
+        tooltip_status = status_text if not focus_text else f"{status_text} · {focus_text}"
+        self.tray.setToolTip(t("tray_tooltip").format(status=tooltip_status))
+
     def _rebuild_tray_menu(self) -> None:
         if self.tray is None:
             return
@@ -693,8 +740,7 @@ class MainWindow(QWidget):
 
     def _check_permissions(self) -> None:
         try:
-            info = self.controller.permissions
-            self.controller.refresh_permissions()
+            info = self.controller.refresh_permissions()
         except Exception:  # noqa: BLE001
             return
         if not info.ready and not self._quitting:

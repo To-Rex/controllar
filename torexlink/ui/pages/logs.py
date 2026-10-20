@@ -18,8 +18,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...constants import APP_VERSION
+from ...constants import REMOTE_LOGS_MIN_VERSION
 from ...logging_setup import read_log_tail
+from ...util import version_at_least
 from ..widgets import (
     Card,
     PageHeader,
@@ -103,6 +104,7 @@ class LogsPage(QWidget):
         super().__init__(parent)
         self.controller = controller
         self._raw = ""
+        self._log_signature: tuple[int, int] | None = None
         self._build()
         self._wire()
         self._refresh_timer = QTimer(self)
@@ -167,7 +169,7 @@ class LogsPage(QWidget):
         layout.addWidget(card, 1)
 
     def _wire(self) -> None:
-        self.refresh_button.clicked.connect(self.refresh)
+        self.refresh_button.clicked.connect(lambda: self.refresh(force=True))
         self.copy_button.clicked.connect(self._copy)
         self.export_button.clicked.connect(self._export)
         self.open_button.clicked.connect(self._open_folder)
@@ -192,8 +194,17 @@ class LogsPage(QWidget):
         if self.isVisible():
             self.refresh(scroll=False)
 
-    def refresh(self, *, scroll: bool = True) -> None:
-        self._raw = read_log_tail(self.controller.service.paths.log_file, max_lines=800)
+    def refresh(self, *, scroll: bool = True, force: bool = False) -> None:
+        log_file = self.controller.service.paths.log_file
+        try:
+            stat = log_file.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+        if not force and signature is not None and signature == self._log_signature:
+            return
+        self._log_signature = signature
+        self._raw = read_log_tail(log_file, max_lines=800)
         self._apply_filter(scroll=scroll)
 
     def _apply_filter(self, *_args, scroll: bool = False) -> None:
@@ -237,7 +248,7 @@ class LogsPage(QWidget):
         if connection is None:
             self.toast.emit(t("logs_remote_no_connection"), "info")
             return
-        if connection.app_version != APP_VERSION:
+        if not version_at_least(connection.app_version, REMOTE_LOGS_MIN_VERSION):
             self.toast.emit(t("logs_remote_update_required"), "error")
             return
         self.remote_button.setEnabled(False)

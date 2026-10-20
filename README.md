@@ -159,7 +159,7 @@ PyInstaller kross-kompilyatsiyani qo‘llamaydi.
 python -m pytest -q
 ```
 
-Joriy holat: **48 ta test** muvaffaqiyatli (crypto, TLS handshake, CPace,
+Joriy holat: **49 ta test** muvaffaqiyatli (crypto, TLS handshake, CPace,
 pairing, auth, focus arbitration, clipboard, settings, mDNS payload, UI
 smoke). Batafsil: [`docs/TESTING.md`](docs/TESTING.md).
 

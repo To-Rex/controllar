@@ -4,6 +4,43 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.6] — 2026-10-20
+
+### Performance
+
+- Input threading endi har bir hardware event uchun alohida asyncio callback
+  yaratmaydi: 16 384 eventgacha bo‘lgan thread-safe burst buferi bir loop
+  callback’ida bo‘shatiladi. Input software round-trip sintetik testda
+  o‘rtacha **0.16 ms** (p95 0.23 ms).
+- Frame hajmi endi JSON’ni ikkinchi marta serialize qilmasdan, framing
+  qatlamidan olinadi; katta clipboard/input oqimida CPU kamaydi.
+- macOS ekran o‘lchami va freeze markazi cache qilinadi; har bir mouse
+  event’ida `CGDisplayBounds` chaqirilmaydi.
+- Snapshot uchun LAN manzillari cache qilinadi (har event’da `ifaddr` emas).
+- Ruxsat preflight natijalari 2 sekundga cache qilinadi.
+- UI endi faqat ko‘rinib turgan sahifani va faqat tegishli event’da yangilaydi;
+  Home/Devices/Connect ro‘yxatlari signature bo‘yicha qayta quriladi.
+  Focus event UI narxi **0.33 ms** (avvalgi barcha sahifalar usulida 2.4 ms,
+  ~7.4x yaxshilanish).
+- Loglar sahifasi fayl o‘zgarmagan bo‘lsa 512 KiB logni qayta o‘qimaydi;
+  tray menyusi faqat ochilganda quriladi.
+- Home sahifasidagi takroriy marketing feature qatorи olib tashlandi —
+  minimalistik va vazifaga yo‘naltirilgan ko‘rinish.
+
+### Stability
+
+- Native input buferi 16 384 event bilan cheklangan; uzoq muddatli burstlarda
+  xotira o‘sishi yo‘q.
+- Autentifikatsiya failure map’i 256 IP bilan cheklangan va eski yozuvlar
+  tozalanadi.
+- 25 000 eventlik soak test: input/native queue’lar 0, peak xotira ~1.2 MB,
+  fokus barqaror qoldi.
+
+### Compatibility
+
+- Remote loglar endi **1.0.5 va undan yangi** versiyalar o‘rtasida ishlaydi
+  (avvalgi exact-match gate yumshatildi).
+
 ## [1.0.5] — 2026-10-20
 
 ### Changed

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..constants import CONNECT_TIMEOUT, HANDSHAKE_TIMEOUT, MAX_FRAME_BYTES, TLS_MIN_VERSION
-from ..protocol.framing import read_frame, write_frame, write_frames_at_once
+from ..protocol.framing import read_frame_sized, write_frame, write_frames_at_once
 from ..security.identity import Identity
 
 log = logging.getLogger(__name__)
@@ -97,6 +97,7 @@ class SecureStream:
     writer: asyncio.StreamWriter
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closed: bool = False
+    last_frame_size: int = 0
 
     @property
     def peername(self) -> tuple[str, int]:
@@ -111,18 +112,21 @@ class SecureStream:
         return ssl_object.version() if ssl_object is not None else "none"
 
     async def recv(self) -> dict[str, Any]:
-        return await read_frame(self.reader, max_bytes=MAX_FRAME_BYTES)
+        message, size = await read_frame_sized(self.reader, max_bytes=MAX_FRAME_BYTES)
+        self.last_frame_size = size
+        return message
 
-    async def send(self, payload: dict[str, Any]) -> None:
+    async def send(self, payload: dict[str, Any]) -> int:
         if self.closed:
             raise TransportError("connection is closed")
-        await write_frame(self.writer, payload, lock=self._write_lock)
+        return await write_frame(self.writer, payload, lock=self._write_lock)
 
-    async def send_batch(self, payloads: list[dict[str, Any]]) -> None:
+    async def send_batch(self, payloads: list[dict[str, Any]]) -> int:
         if self.closed:
             raise TransportError("connection is closed")
         if payloads:
-            await write_frames_at_once(self.writer, payloads, lock=self._write_lock)
+            return await write_frames_at_once(self.writer, payloads, lock=self._write_lock)
+        return 0
 
     async def close(self) -> None:
         if self.closed:

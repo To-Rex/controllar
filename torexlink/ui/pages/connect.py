@@ -82,6 +82,7 @@ class ConnectPage(QWidget):
         self._snapshot: ServiceSnapshot = controller.snapshot
         self._pairing_busy = False
         self._join_busy = False
+        self._discovered_signature: tuple | None = None
         self._build()
         self._wire()
         self.refresh(self._snapshot)
@@ -458,6 +459,7 @@ class ConnectPage(QWidget):
         self.no_devices.description.setText(t("join_card_desc"))
         self.scan_note.setText(t("searching_devices"))
         self.conn_title.setText(t("active_connection"))
+        self._discovered_signature = None
         self.conn_disconnect.setText(t("disconnect"))
         self.host_pill.set_content(t("ready"), "muted")
         self.host_hint.setText(t("pairing_code_hint"))
@@ -529,20 +531,25 @@ class ConnectPage(QWidget):
         self.qr_hint.setText(t("pairing_code_hint"))
 
     def _render_discovered(self, snapshot: ServiceSnapshot, t) -> None:
-        while self.devices_container.count():
-            item = self.devices_container.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
         devices = snapshot.discovered[:4]
+        signature = (self.controller.translator.locale, tuple(devices))
+        if signature != self._discovered_signature:
+            self._discovered_signature = signature
+            while self.devices_container.count():
+                item = self.devices_container.takeAt(0)
+                if item and item.widget():
+                    item.widget().hide()
+                    item.widget().setParent(None)
+                    item.widget().deleteLater()
+            for device in devices:
+                row = DevicePickRow(device, t)
+                row.connect_clicked.connect(lambda _id, d=device: self._open_join_for(d))
+                self.devices_container.addWidget(row)
         self.no_devices.setVisible(not devices)
         self.scan_note.setVisible(False)
         if not devices:
             self.no_devices.title.setText(t("no_devices_found"))
             self.no_devices.description.setText(t("join_card_desc"))
-        for device in devices:
-            row = DevicePickRow(device, t)
-            row.connect_clicked.connect(lambda _id, d=device: self._open_join_for(d))
-            self.devices_container.addWidget(row)
 
 
 __all__ = ["ConnectPage"]

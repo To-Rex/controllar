@@ -24,11 +24,11 @@ class FrameTooLarge(FrameError):
     """Declared frame exceeds the configured protocol limit."""
 
 
-async def read_frame(
+async def read_frame_sized(
     reader: asyncio.StreamReader,
     *,
     max_bytes: int = MAX_FRAME_BYTES,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     header = await reader.readexactly(4)
     (length,) = _HEADER.unpack(header)
     if length == 0:
@@ -42,6 +42,15 @@ async def read_frame(
         raise FrameError("frame is not valid UTF-8 JSON") from exc
     if not isinstance(decoded, dict):
         raise FrameError("frame root must be an object")
+    return decoded, 4 + length
+
+
+async def read_frame(
+    reader: asyncio.StreamReader,
+    *,
+    max_bytes: int = MAX_FRAME_BYTES,
+) -> dict[str, Any]:
+    decoded, _size = await read_frame_sized(reader, max_bytes=max_bytes)
     return decoded
 
 
@@ -50,7 +59,7 @@ async def write_frame(
     payload: dict[str, Any],
     *,
     lock: asyncio.Lock | None = None,
-) -> None:
+) -> int:
     try:
         encoded = json.dumps(
             payload,
@@ -66,10 +75,11 @@ async def write_frame(
     if lock is None:
         writer.write(frame)
         await writer.drain()
-        return
+        return len(frame)
     async with lock:
         writer.write(frame)
         await writer.drain()
+    return len(frame)
 
 
 async def write_frames_at_once(
@@ -77,7 +87,7 @@ async def write_frames_at_once(
     payloads: list[dict[str, Any]],
     *,
     lock: asyncio.Lock,
-) -> None:
+) -> int:
     """Write a small batch under a single drain for latency-sensitive input."""
     encoded_parts: list[bytes] = []
     for payload in payloads:
@@ -91,17 +101,20 @@ async def write_frames_at_once(
             raise FrameTooLarge("outgoing frame is too large")
         encoded_parts.append(_HEADER.pack(len(encoded)) + encoded)
     if not encoded_parts:
-        return
+        return 0
+    total = sum(len(part) for part in encoded_parts)
     async with lock:
         for part in encoded_parts:
             writer.write(part)
         await writer.drain()
+    return total
 
 
 __all__ = [
     "FrameError",
     "FrameTooLarge",
     "read_frame",
+    "read_frame_sized",
     "write_frame",
     "write_frames_at_once",
 ]

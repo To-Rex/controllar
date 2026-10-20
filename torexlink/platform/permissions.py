@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -37,6 +38,8 @@ class PermissionManager:
     def __init__(self, backend_factory: Callable[[], InputBackend]) -> None:
         self._backend_factory = backend_factory
         self._cached_backend: InputBackend | None = None
+        self._cached_status: PermissionInfo | None = None
+        self._cached_status_at = 0.0
 
     def _backend(self) -> InputBackend | None:
         if self._cached_backend is None:
@@ -47,34 +50,47 @@ class PermissionManager:
                 return None
         return self._cached_backend
 
-    def status(self) -> PermissionInfo:
+    def status(self, *, force: bool = False) -> PermissionInfo:
+        # STATUS is polled by several pages and by the permission timer. Native
+        # preflights are not free, so reuse a fresh result for a short window.
+        now = time.monotonic()
+        if (
+            not force
+            and self._cached_status is not None
+            and now - self._cached_status_at < 2.0
+        ):
+            return self._cached_status
         backend = self._backend()
         if backend is None:
-            return PermissionInfo(
+            info = PermissionInfo(
                 supported=False,
                 capture=False,
                 injection=False,
                 capture_detail="Native input support is unavailable on this system",
                 injection_detail="Native input support is unavailable on this system",
             )
-        try:
-            permissions: InputPermissions = backend.preflight()
-        except Exception:  # noqa: BLE001
-            log.debug("Permission preflight failed", exc_info=True)
-            return PermissionInfo(
-                supported=False,
-                capture=False,
-                injection=False,
-                capture_detail="Permission check failed",
-                injection_detail="Permission check failed",
-            )
-        return PermissionInfo(
-            supported=True,
-            capture=permissions.capture,
-            injection=permissions.injection,
-            capture_detail=permissions.capture_detail,
-            injection_detail=permissions.injection_detail,
-        )
+        else:
+            try:
+                permissions: InputPermissions = backend.preflight()
+                info = PermissionInfo(
+                    supported=True,
+                    capture=permissions.capture,
+                    injection=permissions.injection,
+                    capture_detail=permissions.capture_detail,
+                    injection_detail=permissions.injection_detail,
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("Permission preflight failed", exc_info=True)
+                info = PermissionInfo(
+                    supported=False,
+                    capture=False,
+                    injection=False,
+                    capture_detail="Permission check failed",
+                    injection_detail="Permission check failed",
+                )
+        self._cached_status = info
+        self._cached_status_at = now
+        return info
 
     def request(self) -> PermissionInfo:
         backend = self._backend()
@@ -83,7 +99,7 @@ class PermissionManager:
                 backend.request_permissions()
             except Exception:  # noqa: BLE001
                 log.debug("Permission request failed", exc_info=True)
-        return self.status()
+        return self.status(force=True)
 
     def open_settings(self, area: str = "all") -> None:
         if sys.platform != "darwin":
@@ -105,6 +121,8 @@ class PermissionManager:
 
     def reset_cache(self) -> None:
         self._cached_backend = None
+        self._cached_status = None
+        self._cached_status_at = 0.0
 
 
 __all__ = ["PermissionInfo", "PermissionManager"]

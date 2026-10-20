@@ -1,188 +1,204 @@
-# FlowLink
+# ToRexLink
 
-FlowLink shares one keyboard, mouse and clipboard between a macOS and a
-Windows computer over the local network: one shared cursor moves between the
-screens, and the keyboard (and mouse) on **either** desk drives whichever
-screen currently shows it — the "one body, two screens" model. One Rust core
-(`flowlink-core`) implements the wire protocol, encrypted transport, pairing
-and discovery; native shells (Swift/SwiftUI on macOS, Win32/egui on Windows)
-capture and inject input and render the UI.
+**Ikki kompyuter. Bitta klaviatura.**
 
-## Features
+ToRexLink — Windows va macOS uchun xavfsiz, yengil KVM (keyboard-video-mouse)
+dasturi. Bitta jismoniy klaviatura va sichqoncha bilan ikkita kompyuterni
+boshqaradi, matnli clipboardni sinxronlaydi va mDNS orqali qurilmalarni
+avtomatik topadi.
 
-- **Server and client roles** — a role per installation (who listens),
-  switchable at any time from Settings; input sharing itself is symmetric:
-  the keyboard and mouse on **either** computer drive whichever screen shows
-  the shared cursor.
-- **One cursor, either direction** — the edge facing the other computer is
-  exchanged and mirrored automatically (0.3+ on both sides), so a cursor
-  pushed out on one screen always returns through the matching edge on the
-  other. When the cursor is moved by the *other* computer's mouse, the local
-  injector notices the pointer being pushed past the edge and hands control
-  back too — one mouse is enough, no hotkey needed.
-- **Focus-following keyboard** — the keyboard on either desk types into the
-  screen that shows the shared cursor; focus changes suppress the local side
-  before a keystroke can leak.
-- **Connect any way you like** — mDNS auto-discovery of servers on the LAN,
-  manual IP/port entry, scanning the server's QR code, or pasting a
-  `flowlink://connect?...` link.
-- **Encrypted channel** — TCP + TLS 1.3 (rustls), self-signed per-install
-  identities, SHA-256 fingerprints pinned after first pairing (TOFU), 6-digit
-  one-time pairing codes.
-- **Clipboard text sync, both directions** — up to 1 MiB, echo-suppressed;
-  concealed and transient pasteboard types (password managers) are never
-  relayed.
-- **Automatic reconnect** — jittered exponential backoff (250 ms–15 s) and
-  heartbeats every 1 s; a silent peer is declared dead after 6 s.
-- **Menu bar / tray UI** — status, pairing code and QR, connect/disconnect,
-  toggle control, settings, log viewer.
-- **Launch at login** — `SMAppService` on macOS, HKCU Run key on Windows.
-- **File logs** — daily-rotated `flowlink.log.<date>` with an in-app viewer.
+![ToRexLink bosh sahifasi](docs/images/home-light.png)
 
-## Screenshots
+| Juftlash | Sozlamalar (dark) |
+|---|---|
+| ![Kod va QR bilan juftlash](docs/images/connect-pairing.png) | ![Sozlamalar](docs/images/settings-dark.png) |
 
-Both shells implement the same design system (violet accent, light/dark
-palettes, rounded cards, uppercase section headers). Windows previews are
-rendered by the cross-platform egui build (see docs/BUILD.md, "UI preview
-mode"); macOS previews come from the app's built-in snapshot mode
-(`FLOWLINK_SNAPSHOT_DIR`).
+| Diagnostika | Birinchi ishga tushish |
+|---|---|
+| ![Diagnostika](docs/images/diagnostics-light.png) | ![Onboarding](docs/images/onboarding-light.png) |
 
-| | |
-| --- | --- |
-| ![macOS onboarding](docs/screenshots/macos-onboarding.png) | ![Windows onboarding](docs/screenshots/windows-onboarding.png) |
-| ![macOS server dashboard](docs/screenshots/macos-server.png) | ![Windows server dashboard](docs/screenshots/windows-server.png) |
-| ![macOS settings](docs/screenshots/macos-settings.png) | ![Windows settings](docs/screenshots/windows-settings.png) |
-| ![macOS menu bar](docs/screenshots/macos-menubar.png) | ![Windows server page, light theme](docs/screenshots/windows-server-light.png) |
+## Imkoniyatlar
 
-## Repository layout
+- **Host / Guest rejimi** — bitta tugma bilan kod yarating yoki mavjud
+  kompyuterga ulaning.
+- **6 xonali kod yoki QR orqali juftlash** — kod 3 daqiqa amal qiladi,
+  5 urinish bilan cheklangan. QR to‘g‘ridan-to‘g‘ri kameradan yoki rasm
+  faylidan skanerlanadi.
+- **Token orqali avtomatik qayta ulanish** — juftlik bir marta tasdiqlanadi;
+  keyingi ulanishlar 256-bitli token va pinned sertifikat orqali bo‘ladi.
+- **Kursor fokusi** — kursor ekran chetidan o‘tadi yoki `Ctrl+Alt+Space`
+  bilan kompyuterlar almashadi. Ikkala kompyuterning ham klaviaturasi va
+  sichqonchasi boshqaruvni o‘z zimmasiga olishi mumkin.
+- **TLS 1.3** — faqat TLS 1.3, SHA-256 sertifikat fingerprinti pinlanadi,
+  CPace PAKE orqali 6 xonali kod hech qachon ochiq holda yuborilmaydi.
+- **mDNS** — `_torexlink._tcp.local.` orqali LAN qurilmalarini topish;
+  manzil o‘zgarsa mDNS va QR yangilanadi.
+- **Clipboard** — faqat matn, ikki yo‘nalishda, 1 MB gacha, loop himoyasi bilan.
+- **Fon rejimi, avtostart** — macOS menu bar / Windows system tray,
+  ixtiyoriy tizim ishga tushishida avtomatik start.
+- **Interfeys** — to‘liq o‘zbekcha (asosiy), ruscha va inglizcha; til va
+  light/dark mavzuni ilova ichida almashtirish.
+- **Diagnostika va loglar** — ruxsatlar, TLS, mDNS, firewall va sertifikat
+  holati; hisobotni nusxalash yoki faylga saqlash.
+- **Windows Firewall** — foydalanuvchi tasdiqlagandan keyin faqat kerakli
+  portlar uchun UAC orqali qoida qo‘shish.
+- **Xavfsiz saqlash** — tokenlar va sertifikatlar faqat foydalanuvchi uchun
+  o‘qiladigan (0600) fayllarda, hech qachon logga yozilmaydi.
 
-```
-Control/
-├── rust/                          Cargo workspace
-│   ├── Cargo.toml                 workspace deps, version, release profile
-│   └── crates/
-│       ├── flowlink-core/         engine, protocol, TLS, pairing, discovery
-│       ├── flowlink-ffi/          C ABI (flowlink.h) for the macOS app
-│       └── flowlink-win/          Windows shell (Rust + Win32/egui/tray)
-├── macos/                         SwiftPM package
-│   ├── Package.swift              FlowLinkKit + FlowLink app + CFlowLinkCore
-│   ├── Sources/CFlowLinkCore/     C module map around flowlink.h
-│   ├── Sources/FlowLinkKit/       app model, event tap, injector, views
-│   └── Tests/FlowLinkTests/
-├── scripts/                       build-macos.sh, test.sh, Info.plist, icon
-├── docs/                          ARCHITECTURE, PROTOCOL, SECURITY, …
-└── .github/workflows/ci.yml
+## Tez boshlash (manbadan)
+
+Talablar: **Python 3.11+** (build uchun 3.12 tavsiya etiladi), Windows 10/11
+yoki macOS. Ikki kompyuter bir xil ishonchli lokal tarmoqda bo‘lishi kerak.
+
+```bash
+git clone <repository> ToRexLink
+cd ToRexLink
+python3.12 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m torexlink
 ```
 
-## Quick start (macOS)
+macOS’da dastlabki ishga tushishda tizim ruxsatlari so‘raladi:
 
-Requirements: Xcode (full toolchain — SwiftUI macros need its plugin) or
-CommandLineTools, plus Rust via [rustup](https://rustup.rs).
+1. **Input Monitoring** — fizik klaviatura/sichqoncha eventlarini kuzatish.
+2. **Accessibility** — kursor va klaviatura eventlarini boshqa kompyuterga
+   uzatish.
+3. QR skanerlash uchun ixtiyoriy **Camera** ruxsati.
 
-```sh
-./scripts/build-macos.sh          # add --debug for a debug build
-open dist/FlowLink.app
+Ruxsatdan keyin ilovani **qayta ishga tushiring**. Ruxsat oynalarini
+**Sozlamalar → Tizim ruxsatlari** yoki **Diagnostika** bo‘limidan qayta ochish
+mumkin.
+
+### Juftlash
+
+1. Ikkala kompyuterda ToRexLink’ni ishga tushiring.
+2. Birinchi kompyuterda **Ulanish → Bu kompyuterni ulash**ni bosing.
+3. Ekranda 6 xonali kod va QR paydo bo‘ladi.
+4. Ikkinchi kompyuterda:
+   - yaqin atrofdagi qurilmani tanlab kodni kiriting; yoki
+   - **Kod bilan ulanish** orqali IP va kodni kiriting; yoki
+   - **QR orqali** host ekranidagi QR’ni skanerlang.
+5. Juftlash tugagach ulanish avtomatik boshlanadi.
+
+### Boshqaruv
+
+- Aktiv kompyuterdan ikkinchisiga o‘tish uchun sichqonchani tanlangan ekran
+  chetiga olib boring yoki `Ctrl+Alt+Space` bosing.
+- Qaytish uchun xuddi shu tugmani bosing, qarama-qarshi chetga o‘ting yoki
+  boshqa kompyuterning klaviatura/sichqonchasini qo‘zg‘ating — u boshqaruvni
+  darhol o‘ziga oladi.
+- Fokus qaysi qurilmada ekani ilovadagi sariq banner, menu bar tooltip va
+  bildirishnomalarda ko‘rinadi.
+- `Ctrl+Alt+Space` global issiq tugma bo‘lib, u faqat ulanish faol bo‘lganda
+  ishlaydi.
+
+### Clipboard
+
+Faol ulanish mavjud bo‘lsa, 1 MB gacha bo‘lgan matn avtomatik sinxronlanadi.
+Maxfiy ma’lumotlar (masalan, parollar) clipboard orqali tarqalishini
+istamasangiz, uni **Sozlamalar → Clipboard sinxronizatsiyasi** orqali
+o‘chiring.
+
+## MacOS ruxsatlari
+
+| Ruxsat | Nima uchun | Qayerda |
+|---|---|---|
+| Input Monitoring | Fizik HID eventlarini o‘qish | System Settings → Privacy & Security → Input Monitoring |
+| Accessibility | CGEvent orqali klaviatura/sichqoncha yuborish | System Settings → Privacy & Security → Accessibility |
+| Camera (ixtiyoriy) | QR skanerlash | System Settings → Privacy & Security → Camera |
+| Local Network | mDNS va LAN ulanishlari | System Settings → Privacy & Security → Local Network |
+
+Ruxsatlar macOS TCC tomonidan ilova imzosi va bundle ID’ga bog‘lanadi.
+Developer ID bilan imzolanmagan yoki har safar qayta imzolanadigan build’da
+ruxsat qayta so‘ralishi mumkin. Bu — macOS xavfsizlik modeli; ilova buni
+chetlab o‘ta olmaydi.
+
+## Windows
+
+- Klaviatura/sichqoncha uchun qo‘shimcha ruxsat talab qilinmaydi
+  (low-level hooks + `SendInput`).
+- LAN ulanishlari uchun Windows Firewall sozlamasi **Sozlamalar** yoki
+  **Diagnostika** bo‘limidagi tugma orqali, foydalanuvchi roziligi va UAC
+  bilan amalga oshiriladi. Faqat TCP `48620–48629` va mDNS UDP `5353`
+  portlari `private,domain` profillari uchun ochiladi.
+- Secure Desktop (UAC oynasi, Ctrl+Alt+Del, lock screen) boshqa kompyuterdan
+  boshqarilmaydi — bu Windows’ning xavfsizlik chegarasi.
+
+## Yig‘ish
+
+To‘liq ko‘rsatmalar: [`docs/BUILDING.md`](docs/BUILDING.md).
+
+```bash
+# macOS
+./scripts/build_macos.sh              # dist/ToRexLink.app
+CODESIGN_IDENTITY="Developer ID Application: ..." MAKE_DMG=1 ./scripts/build_macos.sh
+
+# Windows PowerShell
+.\scripts\build_windows.ps1           # dist\ToRexLink\ToRexLink.exe
 ```
 
-The script builds the Rust static library (`MACOSX_DEPLOYMENT_TARGET=13.0`),
-copies it into `macos/Vendor`, runs `swift build`, and assembles
-`dist/FlowLink.app` with `Info.plist`, a generated icon and an ad-hoc
-signature. If `xcode-select` points at the Command Line Tools but Xcode is
-installed too, point Swift at Xcode explicitly:
+Oldindan yig‘ilgan `.app`/`.exe` ushbu repoda saqlanmaydi. Build Windows
+uchun Windows mashinasida, macOS uchun macOS mashinasida bajarilishi kerak —
+PyInstaller kross-kompilyatsiyani qo‘llamaydi.
 
-```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./scripts/build-macos.sh
+## Hujjatlar
+
+- [Foydalanuvchi qo‘llanmasi (UZ)](docs/USER_GUIDE_UZ.md)
+- [Arxitektura](docs/ARCHITECTURE.md)
+- [Xavfsizlik modeli](docs/SECURITY.md)
+- [Protokol spetsifikatsiyasi](docs/PROTOCOL.md)
+- [Yig‘ish va ishga tushirish](docs/BUILDING.md)
+- [Testlash / QA](docs/TESTING.md)
+- [Muammolarni bartaraf etish](docs/TROUBLESHOOTING.md)
+
+## Testlar
+
+```bash
+python -m pytest -q
 ```
 
-First run shows an onboarding flow. Grant **Accessibility** (capture and
-inject events) and **Input Monitoring** (observe raw input) in System
-Settings → Privacy & Security; the app links straight to the right panes and
-re-detects grants while it runs.
+Joriy holat: **45 ta test** muvaffaqiyatli (crypto, TLS handshake, CPace,
+pairing, auth, focus arbitration, clipboard, settings, mDNS payload, UI
+smoke). Batafsil: [`docs/TESTING.md`](docs/TESTING.md).
 
-## Quick start (Windows)
+## Arxitektura
 
-Requirements: Rust via rustup on Windows, and VS Build Tools (MSVC) for the
-`windows` crate. Run from the `rust` directory:
-
-```powershell
-cargo build --release -p flowlink-win
-.\target\release\flowlink-win.exe
+```
+torexlink/
+├── security/       CPace P-256, sertifikat identity, token HMAC auth
+├── protocol/       length-prefixed JSON framing, handshake, validatsiya
+├── core/           async xizmat: server, client, pairing, auth, focus,
+│                   clipboard, mDNS, session, state
+├── input/          platform-neutral eventlar + native backendlar:
+│                   macOS Quartz, Windows low-level hooks/SendInput
+├── platform/       ruxsatlar, autostart, Windows Firewall, diagnostika
+├── ui/             PySide6 premium UI, i18n, theme, dialogs, pages
+├── i18n.py         UZ / RU / EN kataloglari
+├── app.py          kirish nuqtasi, single-instance, tray, onboarding
+└── resources/      logo/icon
 ```
 
-See [docs/BUILD.md](docs/BUILD.md) for details, including the note about
-elevated windows.
+Batafsil: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), protokol:
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md), xavfsizlik:
+[`docs/SECURITY.md`](docs/SECURITY.md).
 
-## First connection
+## Cheklovlar
 
-1. On the server, open FlowLink — it starts listening on TCP port 24800 (configurable)
-   and shows a 6-digit pairing code, valid for 10 minutes, plus a QR code.
-2. On the client, either pick the server from the discovered list, enter
-   `host:port` manually, scan the QR code, or paste a link, e.g.
-   `flowlink://connect?h=192.168.1.24&p=24800&fp=<fingerprint>&c=123456`.
-3. Type or scan the code. Both devices now remember each other: the server
-   stores an entry with a 32-byte token, the client stores the token in
-   `last_server`, and later connections authenticate silently.
-4. Move the cursor across the edge you configured on **either** machine.
-   The two computers mirror the setting automatically: set it once (for
-   example Mac = Left, Windows = Right when the Windows PC sits on the left),
-   and the other side follows and remembers it. Press the hotkey
-   **Ctrl+Alt+Space** on either keyboard to jump the cursor to the other
-   screen; the keyboard at either desk then types into the focused screen.
-   Push the cursor back across the facing edge (or press the hotkey again) to
-   bring it back.
-5. Text copied on one side appears on the other side's pasteboard
-   (≤ 1 MiB, concealment types excluded).
+- Bitta asosiy monitor har bir qurilmada (multi-monitor layout hozircha yo‘q).
+- Tarmoq IPv4 asosida ishlaydi; IPv6 listener hozircha yo‘q.
+- Klaviatura mappingi fizik US-joylashuvga asoslangan; murakkab IME/kompozitsiya
+  va ba’zi maxsus media tugmalari qo‘llanmaydi. Matn uchun clipboard’dan
+  foydalaning.
+- macOS Secure Input maydonlari (parol oynalari), Windows Secure Desktop,
+  lock/login ekranlari boshqarilmaydi.
+- File transfer, audio va video uzatish kiritilmagan.
+- macOS prebuilt Qt 6.12 uchun macOS 14+ talab qilinadi.
+- Windows backend ushbu loyihada macOS muhitida statik tekshirilgan; yakuniy
+  QA Windows 10/11 qurilmasida o‘tkazilishi shart (checklist
+  [`docs/TESTING.md`](docs/TESTING.md)).
+- mDNS ishlamaydigan tarmoqlarda IP orqali qo‘lda ulanish mavjud.
 
-Devices are remembered by device id plus shared token; "Forget" in Settings
-deletes the entry and requires pairing again.
+## Litsenziya
 
-## Testing
-
-```sh
-./scripts/test.sh     # cargo test --workspace && (cd macos && swift test)
-```
-
-`cargo test --workspace` runs per-module unit tests plus the end-to-end
-suite `rust/crates/flowlink-core/tests/e2e_pairing.rs`, which boots two real
-engines on loopback with TCP+TLS, pairs them with a code, relays input and
-clipboard, reclaims control and reconnects with the stored token. CI runs the
-Rust tests on macOS and Windows, builds/tests the Swift package and both app
-artifacts (see [docs/BUILD.md](docs/BUILD.md#ci)).
-
-## Security summary
-
-- TLS 1.3 with self-signed ECDSA P-256 identities; SHA-256 fingerprint
-  pinning on every reconnect; a fingerprint mismatch aborts before any
-  secret is sent.
-- TOFU on first contact, gated by a 6-digit, single-use pairing code that is
-  shown only on the server screen (TTL 10 min, 5 attempts, then auto-rotation).
-- Pairing exchanges a 32-byte random token, stored `0600` in the config
-  directory (`0700`); later connections compare it in constant time.
-- Clipboard relay is text-only and size-limited; no keys or clipboard
-  contents are ever written to the logs.
-
-Details, threat model and explicit non-goals: [docs/SECURITY.md](docs/SECURITY.md).
-
-## Status
-
-v0.3 targets macOS 13+ and Windows 10+ in either role, one active peer per
-server. Update **both** computers to 0.3.2 to get automatic edge sync and
-injected-cursor edge return; a 0.2.x peer still connects (protocol 2), but
-only gets the geometric fallback after the first handoff.
-
-Deliberately not included: clipboard images, audio/notification sync, and
-Linux/Wayland shells. Input is bidirectional (either keyboard/mouse can
-drive the focused screen). Platform quirks — secure input fields, UIPI,
-mixed-DPI feel, keyboard layouts — are documented in
-[docs/PLATFORM-LIMITS.md](docs/PLATFORM-LIMITS.md).
-
-## Documentation
-
-| Document | Contents |
-| --- | --- |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, engine internals, threading, storage, tests |
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | Framing, handshake, message and event tables, discovery, links |
-| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, pairing, pinning, limitations |
-| [docs/PLATFORM-LIMITS.md](docs/PLATFORM-LIMITS.md) | macOS/Windows/cross-platform constraints, comparison |
-| [docs/BUILD.md](docs/BUILD.md) | Prerequisites, builds, CI, release checklist |
-| [docs/QOLLANMA.md](docs/QOLLANMA.md) | O‘zbekcha o‘rnatish va foydalanish qo‘llanmasi |
+Proprietary. Batafsil: [`LICENSE`](LICENSE).

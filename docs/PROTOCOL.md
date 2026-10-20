@@ -1,239 +1,282 @@
-# Protocol
+# ToRexLink wire protocol v1
 
-FlowLink wire protocol, version 2. One TCP connection carries one TLS
-session carrying one FlowLink session, always initiated by the client.
+## Transport
 
-## Framing
+- TCP port 48620–48629 (first free).
+- TLS 1.3 exactly, ALPN `torexlink/1`.
+- Frames: 4-byte unsigned big-endian length + UTF-8 JSON object.
+- Maximum frame: 8 MiB. Clipboard fields are limited to 1 MiB UTF-8.
+- All post-handshake messages include `"v": 1` and `"type"`.
+- Unknown fields are ignored; invalid fields close the session.
 
-Every message is one frame:
+JSON is used for clarity and debuggability. Input is batched and coalesced at
+the session layer, not in JSON. If bandwidth becomes critical, a binary input
+channel can be added under a protocol version bump.
 
-```text
-+----------------+--------------------------------------+
-| u32 BE length  | bincode 1.3 payload (fixint)         |
-+----------------+--------------------------------------+
+## Identity
+
+```
+fingerprint = SHA-256(DER certificate), colon display form
+device_id   = lowercase hex SHA-256(DER certificate)
 ```
 
-- Length prefix is 4 bytes big-endian, payload length only.
-- Payloads are `bincode 1.3` (`DefaultOptions` with `fixint` encoding and a
-  size limit), so integers are fixed-width little-endian and enums are
-  `u32` discriminants.
-- `MAX_FRAME_BYTES = 4 MiB` (`4 * 1024 * 1024`): larger declared lengths are
-  rejected before allocation, and the encoder refuses to emit them.
-- A clean EOF before any header byte yields an orderly close; EOF inside a
-  header or payload is an error.
+The certificate is RSA-3072, self-signed, CA:TRUE, valid for 10 years. Peers
+pin the certificate PEM and device ID after pairing.
 
-## Version
+## Pairing handshake
 
-`PROTOCOL_VERSION = 2`. The server rejects a mismatched `Hello` and a client
-rejects a mismatched `HelloAck`, both with a `Bye` where possible. Version
-negotiation is not attempted.
+All messages here are inside TLS 1.3. The TLS channel is not yet identity-pinned.
 
-`Topology` is an **additive** message introduced for 0.3 peers without a
-protocol bump: bincode numbers enum variants in declaration order, so it was
-appended after `Bye` and every 0.2.x message keeps its index. A 0.3 build
-only sends it to a peer whose `Hello.version`/`HelloAck.version` is 0.3+;
-older peers simply never see the variant. `protocol::supports_topology`
-performs that check, and a unit test pins the variant indices.
+### 1. Client hello
 
-## Handshake
-
-```text
-  client                                          server
-    |                                               |
-    |------ TCP connect --------------------------->|
-    |------ TLS handshake (server cert only) ------>|   (client verifies
-    |                                               |    pinned fingerprint
-    |                                               |    before sending secrets)
-    |------ Hello { protocol, device_id, name, ----->|
-    |        version, mode, screen }                |
-    |<----- HelloAck { protocol, device_id, --------|
-    |        name, version, known_device }          |
-    |                                               |
-    |  client has a stored token:                   |
-    |------ Authenticate { device_id, token } ----->|
-    |<----- AuthResult { ok } / { ok:false, reason }|
-    |                                               |
-    |  client has none (pairing required):          |
-    |------ PairRequest { device_id, name, code } -->|
-    |<----- PairResult { ok, token, attempts_left }-|   (code shown on server)
-    |                                               |
-    |==== READY: Input / Clipboard / Heartbeat =====|
+```json
+{
+  "v": 1,
+  "type": "hello",
+  "mode": "pair",
+  "client": {
+    "id": "<sha256 cert hex>",
+    "name": "Studio Mac",
+    "platform": "macos",
+    "app_version": "1.0.0",
+    "nonce": "<base64url 32 bytes>",
+    "cert_pem": "<PEM>"
+  }
+}
 ```
 
-Timeouts: TLS + `Hello`/`HelloAck` 10 s; the server allows 180 s for
-authentication/pairing after `Hello`; the client waits up to 300 s for the
-user to obtain a pairing code.
+### 2. Host challenge
 
-The server refuses a second, *different* client with `Bye { reason: "server is
-busy with another client" }`. A reconnect from the **same device id** is not
-refused: its previous socket may still be inside the dead-man window after a
-Wi-Fi dropout, so the new connection replaces it and cancels the old session.
-The client chooses the auth path itself: with a stored token it sends
-`Authenticate`, otherwise it goes straight to `PairRequest` — the
-`known_device` flag in `HelloAck` is informational only. A stored token
-rejected by the server (`AuthResult { ok: false }`) falls back to the pairing
-flow on the same connection.
-
-## Messages
-
-| Message | Direction | Fields | Notes |
-| --- | --- | --- | --- |
-| `Hello` | client → server | `protocol: u16`, `device_id`, `name`, `version`, `mode`, `screen: ScreenInfo` | First message; must arrive within the handshake timeout |
-| `HelloAck` | server → client | `protocol`, `device_id`, `name`, `version`, `known_device: bool` | `known_device` is true when the server already has a token for this device id |
-| `Authenticate` | client → server | `device_id`, `token` | Proves possession of the pairing token |
-| `AuthResult` | server → client | `ok: bool`, `reason: Optional<String>` | Server also requires `device_id` to equal the `Hello` id |
-| `PairRequest` | client → server | `device_id`, `name`, `code` | Code is the 6-digit code displayed on the server |
-| `PairResult` | server → client | `ok`, `reason`, `token: Optional<String>`, `attempts_left: Optional<u8>` | Token present on success; `attempts_left` is informational |
-| `Input` | both ways | `InputEvent` | Forwarded by the side that does **not** own the cursor; injected by the focused side |
-| `Clipboard` | both ways | `text: String` | UTF-8 text, ≤ `clipboard_max_bytes` |
-| `Heartbeat` | both ways | `seq: u64` | Sent every 1 s |
-| `Pong` | both ways | `seq: u64` | Echoes the heartbeat sequence; used for RTT |
-| `Reclaim` | both ways | – | The unfocused side asks for the shared cursor (hotkey / UI) |
-| `Topology` | both ways | `edge: Edge` | Local edge facing the peer changed; receiver mirrors it. 0.3+ peers only |
-| `Bye` | both ways | `reason: String` | Orderly end, e.g. `busy`, `shutting down`, `pairing timed out` |
-
-Messages that are invalid for a role or state are ignored (trace-logged)
-rather than fatal, except during the handshake where a protocol violation
-closes the connection.
-
-## Focus model (one shared cursor)
-
-Exactly one side owns the shared cursor (`focused`). Server/client only
-decide who listens; input routing is symmetric:
-
-- The **focused** side uses its local input locally. When its pointer crosses
-  its peer-facing edge, it hides its cursor, sends
-  `Input(Enter { edge, along_norm })` and starts forwarding every subsequent
-  event as `Input`. The peer becomes focused and injects those events.
-- The **unfocused** side hides its cursor, captures all of its input and
-  forwards it. Its keyboard therefore types into the focused screen.
-- **The peer-facing edge is shared state.** After the handshake the server
-  sends `Topology { edge }`; the client stores the mirror
-  (`edge.opposite()`) as its own facing edge and persists it. Changing the
-  edge on either side sends `Topology` again, so both computers move the seam
-  together instead of relying on two independent settings being mirrored by
-  hand. Any incoming `Enter` is also geometric truth and updates the local
-  facing edge to `Enter.edge.opposite()` — this self-heals a mismatched
-  configuration and 0.2.x peers, which have no `Topology`.
-- Pressing the hotkey on the unfocused side sends `Reclaim`; the focused side
-  stops showing the cursor (the requester warps its own cursor to the edge
-  facing the peer). Pressing the hotkey on the focused side sends `Enter`
-  instead, handing the cursor over.
-- **Injected-edge return:** when the physical mouse is on the other computer,
-  the focused side receives synthetic moves. Its injector watches them:
-  after `Enter` the pointer must first travel 64 px inside (so an entry or a
-  twitch cannot bounce straight back), and only then an outward push of
-  20 px **while the pointer is actually at the peer-facing edge** causes the
-  shell to issue a local `HandOff` command. A single fast flick from
-  mid-screen cannot trigger it. The core (only if still focused and on that
-  edge) sends `Enter` back, so one physical mouse can cross the shared seam
-  in both directions with no hotkey.
-- Every focus change emits a local `ReleaseAll` so no key/button stays held.
-- At session start the **server** side is focused; the client begins by
-  forwarding. A client that owned the cursor when the link dropped reclaims
-  it immediately after reconnecting.
-
-| Variant | Fields | Semantics |
-| --- | --- | --- |
-| `Enter` | `edge: Edge`, `along_norm: f32` | The *sender's* edge the cursor exited through; the receiver places the pointer on the mirrored side (see `edge::enter_position`) |
-| `Key` | `usage: u16`, `down: bool`, `modifiers: Modifiers` | Physical key event; `usage` is a USB HID keyboard usage id |
-| `MouseMove` | `dx: f32`, `dy: f32` | Relative movement in pixels |
-| `MouseButton` | `button: MouseButton`, `down`, `modifiers` | Button edges |
-| `Scroll` | `dx: f32`, `dy: f32`, `precise: bool` | Wheel/trackpad deltas |
-| `ReleaseAll` | – | Release every key/button the receiving side holds |
-
-### HID convention
-
-Keys travel as USB HID Usage Tables 1.12, Keyboard/Keypad page `0x07`:
-`A = 0x04` … `Z = 0x1D`, `1 = 0x1E` … `0 = 0x27`, `Enter = 0x28`,
-`Space = 0x2C`, `F1 = 0x3A`, modifiers `0xE0–0xE7` (left/right
-Ctrl, Shift, Alt, Meta). Keys are physical positions; the receiving OS
-applies its own layout (see PLATFORM-LIMITS.md).
-
-Modifier bits in `Modifiers` (also the FFI `FL_MOD_*` constants):
-
-| Bit | Value | Meaning |
-| --- | --- | --- |
-| shift | 1 | Shift |
-| ctrl | 2 | Control |
-| alt | 4 | Alt / Option |
-| meta | 8 | Cmd / Windows key |
-
-Mouse buttons use HID button-page ids: `1` left, `2` right, `4` middle.
-
-### Scroll convention
-
-- Positive `dy` scrolls the wheel **away from the user** (up). Positive `dx`
-  means **towards the left** (this mirrors the macOS axis signs, which are
-  negated relative to Windows' horizontal `HWHEEL`).
-- macOS captures `scrollWheelEventDeltaAxis1/2` for discrete wheels (one
-  notch per physical tick) and `scrollWheelEventPointDeltaAxis1/2` for
-  trackpads; Windows captures `HIWORD(mouseData) / WHEEL_DELTA` (notches).
-- `precise = true` marks pixel deltas (trackpads). `precise = false` is a
-  notch-based wheel event; both shells deliver the sign conventions above.
-- Injection: the macOS shell posts a pixel-unit `CGEvent`, multiplying one
-  notch by `12` pixels; the Windows shell multiplies one notch by
-  `WHEEL_DELTA` (120) and divides precise pixel deltas by `12` first, so a
-  trackpad swipe crosses the platforms at the same speed.
-
-## Heartbeats and liveness
-
-Each side sends `Heartbeat { seq }` every 1 s and answers with `Pong { seq }`.
-The round trip updates the RTT metric (the last 8 pending pongs are kept). If
-no frame of any kind arrives for 30 s (`DEAD_AFTER`), the session errors out;
-the client then re-enters its backoff loop (250 ms → 4 s). On shutdown a
-session sends `Bye { reason: "shutting down" }` before closing.
-
-## Discovery (mDNS/DNS-SD)
-
-Servers announce the service `_flowlink._tcp.local.` while listening; every
-engine browses it (no Bonjour/Avahi installation required — pure Rust
-`mdns-sd`).
-
-- Instance name: `<device name> [<first 8 chars of device id>]`
-- Host name: `flowlink-<id-prefix>.local.`
-- Port: the configured `listen_port`
-- TXT record fields:
-
-| Key | Example | Meaning |
-| --- | --- | --- |
-| `id` | `5f1e9a2c-…` | FlowLink device id (UUID) |
-| `name` | `Studio Mac` | User-visible computer name |
-| `role` | `server` | Advertised role |
-| `ver` | `0.1.0` | Core version string |
-| `fp` | `a1b2…` (64 hex chars) | SHA-256 fingerprint of the TLS certificate |
-
-Example resolved record:
-
-```text
-_flowlink._tcp.local.  Studio Mac [5f1e9a2c]  host flowlink-5f1e9a2c.local.
-  192.168.1.24:24800  id=5f1e9a2c-… name="Studio Mac" role=server ver=0.1.0 fp=a1b2…
+```json
+{
+  "v": 1,
+  "type": "pair_challenge",
+  "server": {
+    "id": "<sha256 cert hex>",
+    "name": "Workstation",
+    "platform": "windows",
+    "app_version": "1.0.0",
+    "nonce": "<base64url 32 bytes>",
+    "fingerprint": "<AA:BB:...>"
+  },
+  "sid": "<base64url 32 bytes>",
+  "cpace_pub": "<base64url compressed P-256 point>",
+  "expires_at": 1760000000,
+  "issued_at": 1760000000
+}
 ```
 
-The engine prefers private IPv4 addresses, then other addresses, and prunes
-devices not re-seen for 15 s.
+`sid = SHA-256("ToRexLink pairing sid v1" || server_nonce ||
+client_nonce || client_device_id_bytes)`.
 
-## Connection links (QR and paste)
+The QR fingerprint, if present, must equal the actual TLS certificate
+fingerprint before proceeding.
 
-The server renders an invite link as a QR code (error correction level M,
-4-module quiet zone) and shows it beside the pairing code. Format:
+### 3. Client confirmation
 
-```text
-flowlink://connect?h=<host>&p=<port>&fp=<sha256-hex>&c=<code>
+```json
+{
+  "v": 1,
+  "type": "pair_response",
+  "cpace_pub": "<base64url compressed P-256 point>",
+  "proof": "<base64url HMAC-SHA256>",
+  "signature": "<base64url RSA-PSS SHA-256>"
+}
 ```
 
-| Param | Required | Meaning |
-| --- | --- | --- |
-| `h` (or `host`) | yes | Server address (IPv4, IPv6 or DNS name; percent-decoded) |
-| `p` (or `port`) | no | TCP port, defaults to `24800` |
-| `fp` (or `fingerprint`) | no | Expected certificate fingerprint, pinned immediately |
-| `c` (or `code`) | no | Live pairing code; omitted when no code is active |
+CPace:
 
-Example:
-
-```text
-flowlink://connect?h=192.168.1.24&p=24800&fp=7d08c2f19e0b…&c=123456
+```
+G          = TryAndIncrement_P256(SHA-512("ToRexLink-CPace-P256-v1" || sid || code))
+X, Y       = x*G, y*G
+shared     = SHA-256("CPace-P256-shared\0" || encode(x*Y))
+material   = HKDF-SHA256(shared, salt=sid, info="ToRexLink-CPace-Key-v1", len=96)
+token      = HKDF-SHA256(material[0:32], salt=sid, info="ToRexLink-Pair-Token-v1", len=32)
+client_key = material[32:64]
+server_key = material[64:96]
 ```
 
-Parsing is tolerant: the link may be embedded in surrounding text, and the
-port falls back to the default; only a missing host is fatal.
+Transcript:
+
+```json
+{
+  "domain": "ToRexLink pairing v1",
+  "v": 1,
+  "sid": "...",
+  "client": { "id": "...", "name": "...", "platform": "...",
+              "app_version": "...", "nonce": "...", "cert_sha256": "..." },
+  "server": { "id": "...", "name": "...", "platform": "...",
+              "app_version": "...", "nonce": "...", "fingerprint": "..." },
+  "client_cpace_pub": "...",
+  "server_cpace_pub": "..."
+}
+```
+
+`proof = HMAC-SHA256(client_key, "client\0" || SHA256(canonical_json(transcript)))`
+
+`signature = RSA-PSS(SHA-256, "ToRexLink-Pair-Client-Signature-v1\0" || digest)`
+
+The host also checks that the client certificate hash matches `hello.client.id`.
+
+### 4. Host confirmation
+
+```json
+{
+  "v": 1,
+  "type": "pair_confirmed",
+  "proof": "<base64url HMAC-SHA256>"
+}
+```
+
+`proof = HMAC-SHA256(server_key, "server\0" || transcript_digest)`.
+
+Both parties persist the peer and token. A TCP connection failure immediately
+after this point may produce one removable pairing on the host; the next auth
+will fail until the client retries with the stored token.
+
+## Authentication handshake
+
+### 1. Client hello
+
+Same shape, `"mode": "auth"`, includes client certificate and fresh nonce.
+
+### 2. Host challenge
+
+```json
+{
+  "v": 1,
+  "type": "auth_challenge",
+  "server": { "...": "..." },
+  "issued_at": 1760000000
+}
+```
+
+The client validates the server descriptor fingerprint against the actual TLS
+certificate and the pinned certificate.
+
+### 3. Client proof
+
+```json
+{
+  "v": 1,
+  "type": "auth_response",
+  "proof": {
+    "hmac": "<base64url 32 bytes>",
+    "signature": "<base64url RSA-PSS 384 bytes>"
+  }
+}
+```
+
+Auth transcript binds:
+
+- protocol version;
+- client device ID, name, platform, app version, nonce, cert SHA-256;
+- server device ID, name, platform, app version, nonce, fingerprint.
+
+`digest = SHA-256(canonical_json(transcript))`.
+
+```
+hmac      = HMAC-SHA256(token, "ToRexLink-Auth-Client-v1\0" || digest)
+signature = RSA-PSS(SHA-256, "ToRexLink-Auth-Client-v1\0" || digest)
+```
+
+The server requires both the token and the private key belonging to the stored
+client certificate.
+
+### 4. Host proof
+
+```json
+{
+  "v": 1,
+  "type": "auth_ok",
+  "proof": {
+    "hmac": "<base64url>",
+    "signature": "<base64url>"
+  }
+}
+```
+
+Same construction with the server role label and server private key. The client
+also verified the pinned TLS certificate before any of this.
+
+## Session messages
+
+### Heartbeat
+
+```json
+{"v":1,"type":"ping","id":42}
+{"v":1,"type":"pong","id":42}
+```
+
+A ping is sent every 10 s; no data/pong for 32 s closes the session.
+
+### Input
+
+```json
+{"v":1,"type":"input","seq":17,"event":{"t":"key","key":"a","pressed":true,"repeat":false,"mods":["ctrl"]}}
+{"v":1,"type":"input","seq":18,"event":{"t":"move","dx":0.0031,"dy":-0.0012}}
+{"v":1,"type":"input","seq":19,"event":{"t":"button","button":"left","pressed":true}}
+{"v":1,"type":"input","seq":20,"event":{"t":"wheel","dx":0.0,"dy":1.0}}
+```
+
+- `move` deltas are normalized to the controller’s screen size, bounded ±2.
+- `button` is `left|right|middle|x1|x2`.
+- `wheel` units are detents (Windows 120 units = 1.0).
+- `mods` is advisory; modifier key events are themselves forwarded.
+- Keys are canonical names, not Unicode characters. This preserves keyboard
+  shortcuts; keyboard layout should match for character-level parity.
+
+### Focus
+
+```json
+{"v":1,"type":"focus_request","action":"edge","edge":"right","position":0.42,"request_id":"..."}
+{"v":1,"type":"focus_state","epoch":7,"controller":"<id>","target":"<id>","reason":"edge","entry_edge":"left","position":0.42}
+```
+
+- Only the network server issues `focus_state`.
+- Actions: `toggle`, `edge`, `takeover`, `return`.
+- `entry_edge` is relative to the target and used to warp its pointer when an
+  edge transition occurs.
+- Epoch increases monotonically; stale states are ignored.
+
+### Clipboard
+
+```json
+{"v":1,"type":"clipboard","text":"...","origin":"<device id>","sha256":"<hex>"}
+```
+
+- UTF-8 ≤ 1 MiB.
+- SHA-256 must match; mismatches are rejected.
+- Remote-applied values are not echoed back.
+- Only text is transmitted.
+
+### Close / errors
+
+```json
+{"v":1,"type":"bye","reason":"normal"}
+{"v":1,"type":"error","code":"auth_failed"}
+```
+
+Error codes include `bad_handshake`, `pair_unavailable`, `pair_denied`,
+`auth_failed`, `busy`, `hosting_disabled`, `session_failed`.
+
+## Limits and policy
+
+| Item | Limit |
+|---|---|
+| Frame | 8 MiB |
+| Clipboard text | 1 MiB UTF-8 |
+| Pairing attempts | 5 per offer |
+| Pairing TTL | 180 s |
+| Handshake timeout | 8–12 s |
+| Input rate | ~4500/s, burst 7000 |
+| Clipboard rate | ~1.2/s, burst 8 |
+| Concurrent handshakes | 8 |
+| Active peer sessions | 1 |
+
+## Versioning
+
+`v` is checked in hello and every message. A future breaking change must bump
+the protocol version and provide a migration or reject old peers with a clear
+UI message. Never weaken certificate pinning or TLS minimums without a
+documented security review.

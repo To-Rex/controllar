@@ -1,15 +1,29 @@
-# Rust
-rust/target/
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Swift / Xcode
-macos/.build/
-macos/.swiftpm/
-macos/Vendor/libflowlink_ffi.a
-*.xcuserstate
-.build/
-
-# Build output
+# Build output / local release artifacts
+build/
 dist/
+artifacts/
+screenshots/
+*.spec.bak
+
+# Local application data, certificates and logs
+certs/
+peers.json
+settings.json
+*.log
+.env
+.env.*
 
 # macOS
 .DS_Store
@@ -18,3 +32,11 @@ dist/
 .idea/
 .vscode/
 *.swp
+
+# Legacy FlowLink build paths (kept so old local checkouts aren't staged)
+rust/target/
+macos/.build/
+macos/.swiftpm/
+macos/Vendor/libflowlink_ffi.a
+*.xcuserstate
+.build/

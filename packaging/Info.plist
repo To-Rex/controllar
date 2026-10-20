@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>uz.torexlink.app</string>
+    <key>CFBundleName</key>
+    <string>ToRexLink</string>
+    <key>CFBundleDisplayName</key>
+    <string>ToRexLink</string>
+    <key>CFBundleExecutable</key>
+    <string>ToRexLink</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>NSCameraUsageDescription</key>
+    <string>ToRexLink uses the camera only to scan a ToRexLink pairing QR code. Camera frames never leave this device.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ToRexLink discovers and connects to your paired computer on the local network. No cloud service is used.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_torexlink._tcp</string>
+    </array>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>ToRexLink needs Accessibility permission to forward keyboard and mouse input to your paired computer.</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>ToRexLink needs Input Monitoring permission to read the physical keyboard and mouse events it forwards to your paired computer.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 ToRexLink. All rights reserved.</string>
+
+</dict>
+</plist>

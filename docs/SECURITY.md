@@ -1,143 +1,233 @@
-# Security
+# ToRexLink xavfsizlik modeli
 
-What FlowLink protects against, how, and — just as important — what it
-explicitly does not protect against.
+## 1. Maqsad
 
-## Threat model
+ToRexLink ishonchli lokal tarmoqda ikki qurilma o‘rtasida klaviatura,
+sichqoncha va matnli clipboardni xavfsiz uzatish uchun mo‘ljallangan. Hech
+qanday bulut servisi, akkaunt, telemetriya yoki tashqi CA ishlatilmaydi.
 
-FlowLink is designed for a trusted local network (home, office LAN) where the
-adversary may be a passive eavesdropper, an active machine-in-the-middle on
-the path, or a nearby device that pretends to be one of your computers. It is
-not designed for hostile networks where the local endpoint itself is
-compromised.
+Xavfsizlik quyidagi tamoyillarga asoslanadi:
 
-| Threat | Countermeasure |
-| --- | --- |
-| Eavesdropping on the LAN | TLS 1.3 on every connection; no plaintext mode |
-| Machine-in-the-middle | Certificate fingerprint pinning on reconnect; TOFU with an on-screen pairing code on first contact |
-| Rogue device claiming a known id | Pairing token check (constant-time), bound to the `Hello` device id |
-| Replay of a captured pairing code | Code is single-use, expires after 10 min, dies after 5 wrong attempts |
-| Token theft from disk | Token stored `0600` in a `0700` directory; boundary is the OS user account |
-| Clipboard leakage of passwords | Concealed/transient pasteboard types are never relayed; text-only, size-capped |
-| Secret leakage via logs | Clipboard contents, keys, codes and tokens are never logged |
+- **Zero trust in discovery** — mDNS faqat manzil topadi, autentifikatsiya
+  qilmaydi.
+- **Pinned identity** — juftlashdan keyin faqat ma’lum sertifikat qabul
+  qilinadi.
+- **No plaintext code** — 6 xonali kod CPace PAKE ichida ishlatiladi.
+- **Defense in depth** — TLS 1.3 + CPace + token HMAC + private-key imzo.
+- **Least privilege** — faqat kerakli OS ruxsatlari, firewall portlari.
+- **Privacy by default** — clipboard va matn loglarga yozilmaydi.
 
-## Identities and certificates
+## 2. Identitetlar
 
-- Each installation generates an ECDSA P-256 self-signed certificate at
-  first run (`rcgen`), stored as DER in `identity/identity-cert.der` and
-  `identity/identity-key.der` (`0600`, directory `0700`).
-- The **fingerprint** is the lowercase hex SHA-256 of the certificate DER
-  (64 characters); the UI displays it as uppercase hex in 4-digit groups.
-- The server presents its certificate during the TLS handshake. There are
-  **no client certificates**: client authentication happens at the
-  application layer with the pairing token.
-- The client's rustls verifier (`crypto.rs`, `TofuVerifier`) accepts
-  self-signed server certificates at the TLS layer but still enforces TLS
-  handshake signature verification. Trust is established immediately after
-  the handshake, before any secret is sent:
-  1. if the target carries a pinned fingerprint (from a previous connection,
-     discovery TXT record, or a `flowlink://` link), it must match — any
-     mismatch aborts the connection with both fingerprints named in the
-     error;
-  2. otherwise this is a first contact: nothing is trusted yet, and a
-     successful pairing with the code shown on the server screen is required.
+Har bir oʻrnatish birinchi ishga tushishda quyidagilarni yaratadi:
 
-This is standard TOFU (trust on first use). The security of the first contact
-rests on the user comparing/typing information from the server's screen.
+- RSA-3072 private key;
+- 10 yil amal qiluvchi self-signed X.509 sertifikat;
+- SHA-256 fingerprint (`AA:BB:...`) va device ID (64 hex);
+- keyin random 256-bit pairing token (faqat juftlashda).
 
-## Pairing ceremony
+Sertifikatning o‘zi trust anchor: peer sertifikatni CA sifatida yuklaydi va
+qo‘shimcha fingerprintni tekshiradi. Public CA yo‘q, shuning uchun DNS yoki
+CA kompromissi bilan almashtirib bo‘lmaydi.
 
-1. As long as the server is listening it holds one live pairing code:
-   a random 6-digit number whose first digit is non-zero, TTL 10 min
-   (`DEFAULT_TTL_MS`), 5 attempts (`MAX_ATTEMPTS`). The generous TTL removes
-   the copy/paste race (read the code, walk over, type it) while staying
-   safe: five attempts per rotation leave brute force impractical, and the
-   code is single-use.
-2. The code is displayed on the server (and embedded in the QR / invite link
-   shown there). The client submits it via `PairRequest`; verification is
-   constant-time.
-3. On success (one-time use), the server generates a **32-byte random
-   token**, hex-encoded (64 chars), returns it in `PairResult`, and stores it
-   in `paired_devices` together with the device id and address. The client
-   stores it as `last_server.token` and in its own `paired_devices`.
-4. Wrong attempts decrement the counter (`attempts_left` in the reply);
-   running out, or an expired code, invalidates it and the server
-   automatically rotates in a fresh code. The UI can also rotate on demand
-   ("Regenerate").
-5. Subsequent connections send `Authenticate { device_id, token }`; the
-   server checks the device id against the `Hello` and compares tokens in
-   constant time (`subtle::ConstantTimeEq`). A mismatch yields
-   `AuthResult { ok: false }` and the client falls back to pairing.
+Sertifikat muddati tugasa, yangi identity yaratiladi va barcha eski juftliklar
+qayta juftlashni talab qiladi. Build sertifikat validligini diagnostikada
+ko‘rsatadi.
 
-Tokens are bearer credentials: possession alone suffices, so treat
-`config.json` as sensitive.
+## 3. Juftlash (CPace + TLS)
 
-## What is NOT protected
+1. Host 6 xonali kodni yaratadi (`secrets.randbelow`), 180 sekund TTL,
+   5 urinish limiti.
+2. Client TLS 1.3 bilan ulanadi. Sertifikat hali pinlanmagan, shuning uchun
+   kanal autentifikatsiya qilinmagan hisoblanadi.
+3. Host `session_id`, server nonce va CPace public point yuboradi.
+4. Ikkala tomon `G = hash_to_curve(sid, code)` generatorini hisoblaydi,
+   ephemeral scalar bilan public point almashadi va shared secret oladi.
+5. Shared secretdan HKDF orqali:
+   - `pair_token` (32 bytes),
+   - client confirmation key,
+   - server confirmation key
+   olinadi.
+6. Client CPace proof + o‘z sertifikati private key bilan transcript imzosini
+   yuboradi.
+7. Host tekshiradi va faqat shundan keyin peer’ni saqlaydi; server proof
+   yuboradi.
+8. Client server proofni tekshirgach token saqlanadi.
 
-- **First contact is TOFU.** The client cannot know a server's identity
-  before pairing. Connecting through mDNS discovery or a scanned/pasted link
-  pins the fingerprint straight from the server's own announcement or screen,
-  so relay attacks fail. With manual `host:port` entry there is no
-  fingerprint yet: an on-path attacker can relay the first connection, and a
-  plain impostor can succeed only if they know the code — which is shown on
-  the server screen and is single-use. For hostile networks, pair via QR/link
-  or compare fingerprints out of band.
-- **The QR/link contains the ephemeral pairing code.** Scanning or pasting
-  the link is equivalent to typing the code; treat the link as sensitive for
-  its 2-minute lifetime (and as useless afterwards — the code is single-use).
-- **Local account compromise.** `config.json` (including tokens and paired
-  device ids) is readable by the user account that runs FlowLink. File
-  permissions are the boundary; Full Disk Access, backups and malware running
-  as the user are outside the model.
-- **No forward secrecy beyond TLS 1.3.** There is no key ratcheting or
-  per-session rekeying at the application layer; the long-term token is sent
-  inside TLS. TLS 1.3 itself provides forward secrecy for recorded traffic,
-  but a token disclosed later allows impersonation.
-- **No out-of-band fingerprint verification by default.** Comparing
-  fingerprints is optional (Settings shows this device's fingerprint and
-  paired devices'); enabling the comparison for each new pairing is a
-  plausible "paranoid mode" workflow but is not enforced.
-- **Denial of service.** Anyone who can reach the port can consume the
-  server's single client slot (refused politely with `Bye`) or force pairing
-  attempts; there is no rate limiting beyond the code's attempt counter.
+Muhim xususiyat: 6 xonali kod **hech qachon simdan o‘tmaydi**. Tarmoq
+kuzatuvchisi faqat PAKE transcriptini ko‘radi va offline dictionary
+hujumidan foydalana olmaydi. Onlayn urinishlar 5 ta bilan cheklanadi.
 
-TLS configuration note: rustls is compiled **without** the `tls12` feature —
-FlowLink speaks TLS 1.3 only, there is no downgrade path.
+TLS sertifikat fingerprinti QR ichida bo‘lsa, client uni CPace’dan oldin ham
+tekshiradi. Qo‘lda kiritilgan kodda TOFU modeli ishlaydi, lekin CPace tufayli
+MITM keyingi auth bosqichida muvaffaqiyatli bo‘la olmaydi (pastda).
 
-## Clipboard
+## 4. Qayta ulanish autentifikatsiyasi
 
-- Only **text** is relayed (`Message::Clipboard { text }`), capped in both
-  directions by `clipboard_max_bytes` (default 1 MiB); the macOS pasteboard
-  poller also refuses text above 1 MiB before it reaches the core. Oversized
-  content is dropped with a log line that records the byte count, never the
-  content.
-- On macOS, the pasteboard watcher skips changes whose types include
-  `org.nspasteboard.ConcealedType`, `org.nspasteboard.TransientType` or
-  `com.agilebits.onepassword` — password managers and transient content are
-  not transmitted.
-- Echo suppression (hash of the last text seen in either direction) prevents
-  loops; it is a loop guard, not an authenticity check, so on a fully
-  compromised endpoint clipboard content is visible to that endpoint — that
-  is inherent to clipboard sync.
+Har bir reconnect:
 
-## Permissions
+1. Client pinned TLS context’da host sertifikatini tekshiradi
+   (`verify_mode=CERT_REQUIRED`, faqat peer cert trust anchor sifatida).
+2. Client hello yuboradi: device ID, nom, platforma, nonce, sertifikat.
+3. Host challenge + server nonce yuboradi.
+4. Transcript ikkala nonce, ikkala cert, device ID, versiyani bog‘laydi.
+5. Client:
+   - `HMAC-SHA256(token, "client" || transcript)`;
+   - RSA-PSS(`SHA-256`, transcript) imzo
+   yuboradi.
+6. Host tokenni constant-time tekshiradi, imzo bilan client private key
+   egaligini tasdiqlaydi.
+7. Server xuddi shu tokendan server HMAC + RSA-PSS imzosini yuboradi.
+8. Client buni tekshiradi.
 
-| Platform | Permission | Why |
-| --- | --- | --- |
-| macOS | Accessibility | Create the CGEventTap (capture) and post synthetic events (inject) |
-| macOS | Input Monitoring | Observe raw keyboard events from the tap |
-| macOS | Camera (optional) | Only when scanning the pairing QR code |
-| Windows | none | Normal user rights suffice to hook and inject input |
+Natijada token o‘g‘irlangan taqdirda ham, peer sertifikatining private key’i
+bo‘lmasa, autentifikatsiya o‘tmaydi. Faqat tokenni emas, pinned TLS
+sertifikatini ham bilish kerak.
 
-On Windows, injected input is subject to UIPI: events cannot reach windows of
-higher integrity level (elevated processes) unless FlowLink itself runs
-elevated. `UAC`/secure-desktop prompts are never reachable. See
-PLATFORM-LIMITS.md.
+### Nega MITM pairing’dan keyin ishlamaydi?
 
-## Logging
+Agar hujumchi pairing vaqtida o‘rtada tursa, CPace prooflarini relay qilishi
+mumkin, lekin:
 
-The file logs contain lifecycle facts (listening, connections, pairing
-accepted/rejected with names and attempt counts, errors, discovery events,
-byte counts). Reviewing the sources: no log statement includes key data,
-clipboard text, pairing codes, tokens, or invite links. The in-app log viewer
-reads only from the logs directory.
+- client noto‘g‘ri (hujumchi) sertifikatini pinlaydi;
+- haqiqiy server client’ni boshqa peer sifatida saqlaydi;
+- keyingi auth’da hujumchi tokenni bilmaydi va server imzosini yasay olmaydi;
+- server challenge’idagi fingerprint MITM sertifikatiga mos kelmaydi.
+
+Shu sababli pairing paytida to‘liq MITM ham uzoq muddatli kirishga ega
+bo‘lmaydi. Baribir foydalanuvchi QR’dagi fingerprintni ishonchli kanal orqali
+olishi tavsiya etiladi.
+
+## 5. TLS sozlamalari
+
+- Minimum va maksimum: **TLS 1.3**.
+- ALPN: `torexlink/1`.
+- Server self-signed cert + RSA key.
+- Client pinned context: faqat peer cert trust anchor sifatida.
+- Client pairing context: `CERT_NONE` (chunki hali pin yo‘q), lekin CPace va
+  cert fingerprint bilan app-level autentifikatsiya.
+- TLS compression/renegotiation o‘chirilgan.
+- Sessiya ticketlari Python `ssl` default’ida; long-lived token auth hali ham
+  har ulanishda tekshiriladi.
+- Sertifikat hostname’i ishlatilmaydi; identity pin orqali.
+- PIN o‘zgarsa, client hech qachon avtomatik “davom etish” qilmaydi.
+
+## 6. Token va maxfiy saqlash
+
+- Tokenlar 0600 faylda (`peers.json`), parent papka 0700.
+- Token UI’da, logda, diagnostika hisobotida chiqmaydi.
+- Pairing kodlari ham logga yozilmaydi.
+- Log redaction filtri naqshlar bo‘yicha qo‘shimcha himoya qiladi.
+- Clipboard matni hech qachon logga yozilmaydi.
+- Atomik yozish: vaqtinchalik fayl + fsync + `os.replace`.
+- Sertifikat/key fayllari 0600.
+
+Clipboard OS darajasida boshqa ilovalar tomonidan o‘qilishi mumkin — bu
+operatsion tizimning umumiy xususiyati. Maxfiy matnlar uchun clipboard
+sinxronizatsiyasini o‘chiring.
+
+## 7. Tarmoq himoyasi
+
+- Faqat TCP; portlar 48620–48629 diapazonidan.
+- Bitta vaqtda bitta faol session.
+- Server handshake concurrency 8.
+- Auth failure limiti: bir IP’dan 60 sekundda 6 marta xato → 30 sekund blok.
+- Pairing: 5 urinish, 1 sekund failure delay, 180 sekund TTL.
+- Frame limiti 8 MiB; clipboard 1 MiB.
+- Input rate limiti ~4500 event/s burst 7000; clipboard ~1.2/s burst 8.
+- Noto‘g‘ri JSON, noma’lum tur, ortiqcha maydon, NaN va noto‘g‘ri qiymatlar
+  rad etiladi.
+- xato javoblari autentifikatsiyadan oldin generic (`auth_failed`,
+  `pair_denied`) — enumeration kamaytiriladi.
+- Token compare `hmac.compare_digest`.
+- RSA-PSS signature verification.
+- Sertifikat fingerprinti time-constant compare orqali emas, lekin public
+  qiymat; pinning xavfsizligi TLS trust modeliga tayanadi.
+
+## 8. Native input xavfsizligi
+
+- macOS event tap va CGEvent injection faqat foydalanuvchi bergan Input
+  Monitoring + Accessibility ruxsatlari bilan ishlaydi.
+- macOS app sandbox ishlatilmaydi; sandbox global HID tap uchun mos emas.
+- Windows low-level hooks qo‘shimcha ruxsat talab qilmaydi.
+- O‘z synthetic eventlarimizni qayta ishlash taqiqlanadi:
+  - macOS: source PID + maxsus `kCGEventSourceUserData` tegi;
+  - Windows: `LLKHF_INJECTED`/`LLMHF_INJECTED` + `dwExtraInfo` tegi.
+- Bu feedback loop, cheksiz inject va “o‘z-o‘zini boshqarish”ning oldini
+  oladi.
+- Clipboard faqat matn, HTML/file kabi boshqa formatlar uzatilmaydi.
+- macOS Secure Input, Windows Secure Desktop/UAC/lock screen boshqarilmaydi —
+  bu ataylab.
+
+## 9. Windows Firewall
+
+Faqat foydalanuvchi tasdiqlagandan keyin:
+
+- TCP 48620–48629 inbound (private, domain);
+- UDP 5353 mDNS inbound (private, domain).
+
+Qoidalar `netsh advfirewall` orqali UAC bilan o‘rnatiladi. Ilova o‘z-o‘zidan
+admin huquqi olmaydi. Public profilga qoida qo‘shilmaydi.
+
+macOS’da Application Firewall tizim tomonidan boshqariladi; ilova faqat
+tizim so‘roviga javob beradi.
+
+## 10. Ruxsatlar va TCC
+
+macOS TCC ruxsatlari bundle ID + code signature’ga bog‘langan. Ad-hoc yoki
+har safar boshqa imzo bilan build qilinsa, foydalanuvchi ruxsatni qayta berishi
+mumkin. Bu kamchilik emas — OS himoyasi. Ishlab chiqarish uchun barqaror
+Developer ID va notarizatsiya tavsiya etiladi.
+
+Ruxsatlarni majburan aylanib o‘tish, event tap’ni yashirish yoki foydalanuvchi
+roziligisiz firewall o‘zgartirish **taqiqlanadi**.
+
+## 11. Threat model — nima himoyalangan
+
+| Tahdid | Himoya |
+|---|---|
+| LAN kuzatuvi | TLS 1.3 |
+| Kodni online brute force | CPace, 5 urinish, delay |
+| Kodning offline brute force | PAKE (kod simdan o‘tmaydi) |
+| Boshqa qurilma qalbakilashtirishi | Pinlangan cert + CPace |
+| Token o‘g‘irlanishi | Private-key signature talabi |
+| Replay | Nonce, transcript HMAC, yangi TLS |
+| Malicious JSON/frame | Qat’iy sxema, limitlar, rate limit |
+| Input feedback loop | Injected event teglari |
+| Clipboard secret loglari | Log qilinmaydi, redaction |
+| Discovery spoofing | mDNS trust qilinmaydi, kod/pin talab |
+| DNS/CA hijack | CA ishlatilmaydi |
+| Ruxsatsiz boshqarish | OS consent + code/QR |
+
+## 12. Non-goals / cheklovlar
+
+- Foydalanuvchi allaqachon juftlashgan qurilmalarga ishonadi. Ulardan biri
+  to‘liq kompromiss bo‘lsa, u boshqaruvni boshqarishi mumkin — bu KVM’ning
+  tabiati. Qurilmalarni faqat ishonchli kompyuterlar bilan juftlang.
+- Lokal administrator huquqiga ega hujumchi process’ni o‘zgartirishi mumkin;
+  bu OS threat modelidan tashqarida.
+- Clipboard OS miqyosida boshqa ilovalar tomonidan kuzatilishi mumkin.
+- TLS pin sertifikat muddati 10 yil; yangilanish qayta juftlash talab qiladi.
+- Kod 6 xonali (1 000 000 kombinatsiya) — PAKE va attempt limit bilan.
+- Pairing vaqtida QR ekranini ko‘rgan odam kodni bilib oladi; QR’ni boshqa
+  odamga ko‘rsatmang.
+- Secure Desktop / login sahifalarida input ishlamaydi.
+- Traffic analysis (qachon ulangan, qancha event) oldini olinmaydi.
+- CPace uchun P-256 scalar multiplication Python’da implement qilingan va
+  formal ma’noda constant-time emas. Pairing bir martalik, kod 20-bit va
+  urinishlar 5 ta bilan cheklangan; shunga qaramay yuqori darajadagi yon-kanal
+  auditi talab qilinsa, vetted constant-time guruh implementatsiyasiga
+  o‘tish tavsiya etiladi.
+- IPv6 listener hozircha qo‘llanmaydi; LAN IPv4 ishlatiladi.
+
+## 13. Zaiflik haqida xabar berish
+
+Xavfsizlik muammosini ommaviy issue sifatida emas, loyiha egasiga xususiy
+kanal orqali xabar bering. Hisobotda:
+
+- ta’sir doirasi;
+- takrorlash qadamlari;
+- ToRexLink versiyasi va OS;
+- loglar (token, kod va clipboard mazmunisiz).
+
+Javobgarlik oshkor qilish siyosati alohida kelishiladi.

@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "torexlink"
+version = "1.0.0"
+description = "ToRexLink — xavfsiz, ikki kompyuter uchun klaviatura va sichqoncha almashinuvi"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "ToRexLink" }]
+keywords = ["kvm", "keyboard", "mouse", "sharing", "macos", "windows"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Environment :: MacOS X",
+  "Environment :: Win32 (MS Windows)",
+]
+dependencies = [
+  "PySide6-Essentials>=6.7,<6.13",
+  "PySide6-Addons>=6.7,<6.13",
+  "cryptography>=43.0",
+  "zeroconf>=0.132",
+  "qrcode>=7.4",
+  "Pillow>=10.0",
+  "zxing-cpp>=2.2",
+  "pyobjc-framework-Cocoa>=10.3; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz>=10.3; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices>=10.3; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "pyinstaller>=6.10",
+  "ruff>=0.9",
+  "mypy>=1.11",
+]
+
+[project.gui-scripts]
+torexlink = "torexlink.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["torexlink"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"torexlink/resources" = "torexlink/resources"
+"torexlink/py.typed" = "torexlink/py.typed"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/torexlink",
+  "/tests",
+  "/README.md",
+  "/docs",
+  "/scripts",
+  "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+  "ignore::DeprecationWarning:zeroconf.*",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM105", "SIM102", "SIM108"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      ToRexLink is intentionally not sandboxed because a sandbox cannot install
+      a system-wide HID event tap or inject input into other applications.
+      Accessibility / Input Monitoring are still user-granted TCC permissions.
+
+      If a distribution channel requires the sandbox, the KVM features cannot
+      be delivered under that entitlement model. Do not weaken TCC checks.
+    -->
+</dict>
+</plist>

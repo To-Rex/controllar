@@ -119,3 +119,25 @@ def test_pages_language_theme_and_dialogs(qapp, tmp_path, monkeypatch) -> None:
     image = qrcode.make("torexlink://pair?d=invalid")
     image.save(path)
     assert decode_qr_file(str(path)) == "torexlink://pair?d=invalid"
+
+
+def test_macos_backend_initialises_all_native_state() -> None:
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS native backend only")
+    from torexlink.input.macos import MacOSInputBackend
+
+    backend = MacOSInputBackend()
+    width, height = backend.screen_size()
+    assert width > 0
+    assert height > 0
+    for attribute in (
+        "_cursor_hide_depth",
+        "_last_cursor_check",
+        "_pointer_frozen",
+        "_frozen_center",
+        "_screen_size_cache",
+        "_screen_size_at",
+    ):
+        assert hasattr(backend, attribute)

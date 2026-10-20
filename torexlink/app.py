@@ -89,8 +89,15 @@ def _self_test() -> int:
                 "NSPasteboard": hasattr(AppKit, "NSPasteboard"),
                 "AXIsProcessTrusted": hasattr(ApplicationServices, "AXIsProcessTrusted"),
             }
+            try:
+                from .input.macos import MacOSInputBackend
+
+                width, height = MacOSInputBackend().screen_size()
+                checks["input_backend_init"] = width > 0 and height > 0
+            except Exception as exc:  # noqa: BLE001
+                checks["input_backend_init"] = f"error: {exc}"
             results["macos_native"] = checks
-            failed = failed or not all(checks.values())
+            failed = failed or not all(value is True for value in checks.values())
         except Exception as exc:  # noqa: BLE001
             results["macos_native"] = f"error: {exc}"
             failed = True

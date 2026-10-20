@@ -99,6 +99,12 @@ class MacOSInputBackend:
         self._injected_buttons_down: set[str] = set()
         self._last_physical_pointer: tuple[float, float] | None = None
         self._cursor_hidden = False
+        self._cursor_hide_depth = 0
+        self._last_cursor_check = 0.0
+        self._pointer_frozen = False
+        self._frozen_center: tuple[int, int] = (0, 0)
+        self._screen_size_cache: tuple[int, int] = (0, 0)
+        self._screen_size_at = 0.0
         self._scroll_accum_x = 0.0
         self._scroll_accum_y = 0.0
         self._tap_callback = self._on_tap_event

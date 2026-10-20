@@ -4,6 +4,20 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.7] — 2026-10-20
+
+### Fixed
+
+- KRITIK: 1.0.6’da macOS native backend’ning yangi maydonlari
+  (`_screen_size_cache`, `_cursor_hide_depth`, `_pointer_frozen`,
+  `_frozen_center`) `__init__`da qo‘shilmagan edi. Focus qo‘llashda
+  `AttributeError` chiqib, kompyuterlar o‘rtasida cursor o‘tishi butunlay
+  to‘xtagan. Barcha maydonlar qo‘shildi.
+- macOS native backend focus holatlari (passive → local → forwarding → local)
+  real backend bilan tekshirildi.
+- `--self-test` endi macOS backend’ni instansiyalab, `screen_size()`ni ham
+  tekshiradi; 50-test to‘plamiga native state regressiya testi qo‘shildi.
+
 ## [1.0.6] — 2026-10-20
 
 ### Performance

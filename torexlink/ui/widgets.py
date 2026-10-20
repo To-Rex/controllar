@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 
@@ -42,6 +43,8 @@ AMBER = "#E5A13A"
 DANGER = "#F05A68"
 MUTED = "#8D95AB"
 WHITE = "#FFFFFF"
+
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------- helpers
@@ -270,19 +273,28 @@ class Dot(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        center = self.rect().center()
-        if self._pulsing:
-            glow = QColor(self._color)
-            glow.setAlphaF(0.18 * (1.0 - self._pulse))
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            center = self.rect().center()
+            if self._pulsing:
+                glow = QColor(self._color)
+                glow.setAlphaF(0.18 * (1.0 - self._pulse))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(glow)
+                radius = self._diameter / 2 + self._pulse * (self._diameter / 1.4)
+                painter.drawEllipse(
+                    QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
+                )
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(glow)
-            radius = self._diameter / 2 + self._pulse * (self._diameter / 1.4)
-            painter.drawEllipse(QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(self._color)
-        radius = self._diameter / 2
-        painter.drawEllipse(QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2))
+            painter.setBrush(self._color)
+            radius = self._diameter / 2
+            painter.drawEllipse(
+                QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
+            )
+        except Exception:  # noqa: BLE001 - painting must never crash the app
+            log.exception("Status dot painting failed")
+        finally:
+            painter.end()
 
 
 class Banner(QFrame):
@@ -390,24 +402,29 @@ class ToggleSwitch(QAbstractButton):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        track_off = QColor("#30384C" if self._dark else "#E1E5F0")
-        track_on = QColor(ACCENT)
-        track = QColor(
-            int(track_off.red() + (track_on.red() - track_off.red()) * self._position),
-            int(track_off.green() + (track_on.green() - track_off.green()) * self._position),
-            int(track_off.blue() + (track_on.blue() - track_off.blue()) * self._position),
-        )
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(track)
-        painter.drawRoundedRect(QRectF(0, 1, 42, 22), 11, 11)
-        knob_x = 3 + self._position * 21
-        painter.setBrush(QColor("#FFFFFF"))
-        painter.drawEllipse(QRectF(knob_x, 4, 16, 16))
-        if self.hasFocus():
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(ACCENT_SOFT), 1.4))
-            painter.drawRoundedRect(QRectF(0.7, 0.7, 40.6, 22.6), 11, 11)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            track_off = QColor("#30384C" if self._dark else "#E1E5F0")
+            track_on = QColor(ACCENT)
+            track = QColor(
+                int(track_off.red() + (track_on.red() - track_off.red()) * self._position),
+                int(track_off.green() + (track_on.green() - track_off.green()) * self._position),
+                int(track_off.blue() + (track_on.blue() - track_off.blue()) * self._position),
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(track)
+            painter.drawRoundedRect(QRectF(0, 1, 42, 22), 11, 11)
+            knob_x = 3 + self._position * 21
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawEllipse(QRectF(knob_x, 4, 16, 16))
+            if self.hasFocus():
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(ACCENT_SOFT), 1.4))
+                painter.drawRoundedRect(QRectF(0.7, 0.7, 40.6, 22.6), 11, 11)
+        except Exception:  # noqa: BLE001 - painting must never crash the app
+            log.exception("Toggle painting failed")
+        finally:
+            painter.end()
 
 
 class SegmentedControl(QFrame):
@@ -538,12 +555,19 @@ class Spinner(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(3, 3, self._diameter - 6, self._diameter - 6)
-        painter.setPen(QPen(QColor(113, 97, 255, 48), 2.4))
-        painter.drawEllipse(rect)
-        painter.setPen(QPen(QColor(ACCENT_SOFT), 2.4, cap=Qt.PenCapStyle.RoundCap))
-        painter.drawArc(rect, int(-self._angle * 16), int(110 * 16))
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(3, 3, self._diameter - 6, self._diameter - 6)
+            painter.setPen(QPen(QColor(113, 97, 255, 48), 2.4))
+            painter.drawEllipse(rect)
+            arc_pen = QPen(QColor(ACCENT_SOFT), 2.4)
+            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(arc_pen)
+            painter.drawArc(rect, int(-self._angle * 16), int(110 * 16))
+        except Exception:  # noqa: BLE001 - painting must never crash the app
+            log.exception("Spinner painting failed")
+        finally:
+            painter.end()
 
     def start(self) -> None:
         self._timer.start()
@@ -660,24 +684,29 @@ class QRCodeView(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#FFFFFF"))
-        painter.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 14, 14)
-        if not self._data:
-            return
-        if self._pixmap is None:
-            self._pixmap = self._render()
-        inset = 10
-        target = self.rect().adjusted(inset, inset, -inset, -inset)
-        scaled = self._pixmap.scaled(
-            target.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        x = target.x() + (target.width() - scaled.width()) // 2
-        y = target.y() + (target.height() - scaled.height()) // 2
-        painter.drawPixmap(x, y, scaled)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 14, 14)
+            if not self._data:
+                return
+            if self._pixmap is None:
+                self._pixmap = self._render()
+            inset = 10
+            target = self.rect().adjusted(inset, inset, -inset, -inset)
+            scaled = self._pixmap.scaled(
+                target.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = target.x() + (target.width() - scaled.width()) // 2
+            y = target.y() + (target.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+        except Exception:  # noqa: BLE001 - painting must never crash the app
+            log.exception("QR code painting failed")
+        finally:
+            painter.end()
 
 
 class Avatar(QLabel):

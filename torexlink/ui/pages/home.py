@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
@@ -42,6 +43,8 @@ from ..widgets import (
 if TYPE_CHECKING:
     from ..controller import ToRexLinkController
 
+log = logging.getLogger(__name__)
+
 
 class HeroCard(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -53,17 +56,21 @@ class HeroCard(QFrame):
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        width = self.width()
-        painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(width - 190, -180, 420, 420)
-        painter.setPen(QPen(QColor(255, 255, 255, 20), 1))
-        painter.drawEllipse(width - 120, -110, 280, 280)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(108, 92, 255, 42))
-        painter.drawEllipse(width - 160, 70, 230, 230)
-        painter.end()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            width = self.width()
+            painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(width - 190, -180, 420, 420)
+            painter.setPen(QPen(QColor(255, 255, 255, 20), 1))
+            painter.drawEllipse(width - 120, -110, 280, 280)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(108, 92, 255, 42))
+            painter.drawEllipse(width - 160, 70, 230, 230)
+        except Exception:  # noqa: BLE001 - painting must never crash the app
+            log.exception("Hero artwork painting failed")
+        finally:
+            painter.end()
 
 
 class HomePage(QWidget):

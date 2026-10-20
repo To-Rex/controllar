@@ -65,6 +65,13 @@ def test_pages_language_theme_and_dialogs(qapp, tmp_path, monkeypatch) -> None:
         qapp.processEvents()
         assert join.code_input.maxLength() == 6
         assert join.windowTitle()
+        # Regression: a bad QPen argument in Spinner.paintEvent crashed the
+        # packaged app exactly while this pairing spinner was visible.
+        join._set_busy(True)
+        qapp.processEvents()
+        join.grab()
+        assert join.progress.isVisible()
+        join._busy = False
         join.close()
         join.deleteLater()
 

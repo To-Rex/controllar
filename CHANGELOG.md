@@ -4,6 +4,20 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.1] — 2026-10-20
+
+### Fixed
+
+- KRITIK: `JoinDialog`dagi spinner noto‘g‘ri `QPen` argumenti tufayli macOS’da
+  ilova segfault bo‘lishi tuzatildi. Barcha custom `paintEvent`lar endi
+  istisnolarga chidamli va `QPainter` har doim yopiladi.
+- Cursor edge handoff: qaytishdan so‘ng darhol yana edge’ga chiqib ketish
+  (ping-pong) oldini olish uchun 56 px ichkariga harakat qilish talab qilinadi;
+  target tomonda ham return gesture 40 px re-arm bilan himoyalandi.
+- Tasodifiy takeover’ni kamaytirish uchun sichqoncha harakati chegarasi
+  8 px → 24 px.
+- Ikki tomonlama cursor o‘tishini tekshiruvchi regressiya testi qo‘shildi.
+
 ## [1.0.0] — 2026-10-20
 
 ### Added

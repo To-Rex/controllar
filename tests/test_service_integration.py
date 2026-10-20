@@ -272,3 +272,63 @@ async def test_identity_and_token_survive_restart_auto_connect(tmp_path) -> None
     finally:
         await guest2.stop()
         await host2.stop()
+
+
+@pytest.mark.asyncio
+async def test_edge_return_disarms_until_pointer_moves_inward(service_factory) -> None:
+    from torexlink.input.events import InputMoveEvent
+
+    host, host_backend, _ = service_factory(name="roundtrip-host", hosting=True)
+    guest, guest_backend, _ = service_factory(
+        name="roundtrip-guest", hosting=False, edge_switch=True, edge="right"
+    )
+    try:
+        await host.start()
+        await guest.start()
+        pairing = await host.begin_pairing()
+        await guest.pair_with_payload(PairingPayload.parse(pairing.qr_uri))
+        await wait_for(lambda: guest.snapshot().connection is not None)
+        await wait_for(lambda: host.snapshot().connection is not None)
+        await wait_for(lambda: guest.snapshot().focus is not None)
+        await wait_for(lambda: guest_backend.started and host_backend.started, timeout=6)
+
+        # 1. Guest crosses its right edge into the host.
+        guest_backend.cursor = (1919, 540)
+        guest_backend.emit(InputMoveEvent(dx=0.02, dy=0.0, x=1919, y=540))
+        await wait_for(lambda: host.snapshot().focus and host.snapshot().focus.local_target)
+        await wait_for(lambda: host_backend.cursor[0] <= 3)
+
+        # 2. Remote cursor moves inward, arming the return gesture, then exits
+        #    through the same edge and returns focus to the guest.
+        guest_backend.emit(InputMoveEvent(dx=0.05, dy=0.0, x=900, y=540))
+        await wait_for(lambda: host_backend.cursor[0] >= 40, timeout=3)
+        # The target deliberately ignores edge returns during the first 150 ms
+        # after entry, so let that grace window expire before testing return.
+        await asyncio.sleep(0.2)
+        guest_backend.emit(InputMoveEvent(dx=-0.12, dy=0.0, x=900, y=540))
+        await wait_for(
+            lambda: guest.snapshot().focus is not None
+            and guest.snapshot().focus.local_target
+            and guest.snapshot().focus.controller_id == guest.identity.device_id,
+            timeout=6,
+        )
+        await wait_for(lambda: host.snapshot().focus and not host.snapshot().focus.local_target)
+
+        # 3. Immediately pushing outward again must NOT bounce straight back.
+        guest_backend.emit(InputMoveEvent(dx=0.05, dy=0.0, x=1919, y=540))
+        await asyncio.sleep(0.5)
+        guest_focus = guest.snapshot().focus
+        assert guest_focus is not None
+        assert guest_focus.local_target is True
+        assert guest_focus.local_controller is True
+
+        # 4. Moving away from the edge rearms it; a deliberate second crossing
+        #    still works in the same session.
+        guest_backend.emit(InputMoveEvent(dx=-0.07, dy=0.0, x=1780, y=540))
+        await asyncio.sleep(0.15)
+        guest_backend.emit(InputMoveEvent(dx=0.07, dy=0.0, x=1919, y=540))
+        await wait_for(lambda: host.snapshot().focus and host.snapshot().focus.local_target)
+        assert host.snapshot().focus.target_id == host.identity.device_id
+    finally:
+        await guest.stop()
+        await host.stop()

@@ -315,39 +315,44 @@ class CameraPreview(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(Qt.GlobalColor.black)
-        painter.drawRoundedRect(self.rect(), 14, 14)
-        if self._image is not None and not self._image.isNull():
-            scaled = self._image.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = (scaled.width() - self.width()) // 2
-            y = (scaled.height() - self.height()) // 2
-            painter.setClipPath(_rounded_path(self.rect(), 14))
-            painter.drawImage(-x, -y, scaled)
-        else:
-            painter.setPen(QPen(Qt.GlobalColor.white))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "…")
-        painter.setClipping(False)
-        frame_size = min(self.width(), self.height()) * 0.58
-        x = (self.width() - frame_size) / 2
-        y = (self.height() - frame_size) / 2
-        pen = QPen(QColor(255, 255, 255, 220), 2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        segment = 22
-        for (sx, sy, dx, dy) in (
-            (x, y, 1, 1),
-            (x + frame_size, y, -1, 1),
-            (x, y + frame_size, 1, -1),
-            (x + frame_size, y + frame_size, -1, -1),
-        ):
-            painter.drawLine(int(sx), int(sy), int(sx + dx * segment), int(sy))
-            painter.drawLine(int(sx), int(sy), int(sx), int(sy + dy * segment))
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(Qt.GlobalColor.black)
+            painter.drawRoundedRect(self.rect(), 14, 14)
+            if self._image is not None and not self._image.isNull():
+                scaled = self._image.scaled(
+                    self.size(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                x = (scaled.width() - self.width()) // 2
+                y = (scaled.height() - self.height()) // 2
+                painter.setClipPath(_rounded_path(self.rect(), 14))
+                painter.drawImage(-x, -y, scaled)
+            else:
+                painter.setPen(QPen(Qt.GlobalColor.white))
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "…")
+            painter.setClipping(False)
+            frame_size = min(self.width(), self.height()) * 0.58
+            x = (self.width() - frame_size) / 2
+            y = (self.height() - frame_size) / 2
+            pen = QPen(QColor(255, 255, 255, 220), 2.0)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            segment = 22
+            for (sx, sy, dx, dy) in (
+                (x, y, 1, 1),
+                (x + frame_size, y, -1, 1),
+                (x, y + frame_size, 1, -1),
+                (x + frame_size, y + frame_size, -1, -1),
+            ):
+                painter.drawLine(int(sx), int(sy), int(sx + dx * segment), int(sy))
+                painter.drawLine(int(sx), int(sy), int(sx), int(sy + dy * segment))
+        except Exception:  # noqa: BLE001 - painting must never crash the app
+            log.exception("Camera preview painting failed")
+        finally:
+            painter.end()
 
 
 def _rounded_path(rect, radius: float):

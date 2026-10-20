@@ -58,8 +58,11 @@ autentifikatsiya qilinadi.
 - **Sichqoncha bilan:** kursorni sozlamalarda tanlangan ekran chetiga olib
   boring. Masalan, ikkinchi kompyuter o‘ng tomonda bo‘lsa, “O‘ng”ni tanlang.
 - **Klaviatura bilan:** `Ctrl+Alt+Space`.
-- **Qaytish:** yuqoridagi usullardan biri yoki ikkinchi kompyuterning fizik
-  sichqonchasi/klaviaturasini qo‘zg‘ating.
+- **Qaytish:** kursor kirgan chetga qaytib o‘ting, `Ctrl+Alt+Space` bosing
+  yoki ikkinchi kompyuterning fizik sichqonchasi/klaviaturasini qo‘zg‘ating.
+- Qaytganingizdan so‘ng tasodifiy “sakrash” bo‘lmasligi uchun kursor chetdan
+  kamida 56 px ichkariga surilishi kerak — shundan keyin keyingi o‘tish
+  faollashadi. Target kompyuterda ham xuddi shu 40 px himoya ishlaydi.
 
 Ekranning yuqori qismidagi banner va tray tooltip qaysi kompyuter boshqaruvda
 ekanligini ko‘rsatadi.

@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..constants import (
+    EDGE_REARM_MARGIN_PX,
     EVENT_COOLDOWN_SECONDS,
     HOTKEY_LABEL,
+    REMOTE_RETURN_REARM_MARGIN_PX,
     SCREEN_EDGE_MARGIN_PX,
     TAKEOVER_MOVE_THRESHOLD_PX,
 )
@@ -69,6 +71,9 @@ class InputBridge:
         self._saved_pointer: tuple[int, int] | None = None
         self._takeover_travel = 0.0
         self._edge_latched = False
+        self._edge_armed = False
+        self._remote_return_armed = False
+        self._receiving_since = 0.0
         self._injected_return_latched = False
         self._last_focus_request = 0.0
         self._last_hotkey = 0.0
@@ -115,6 +120,14 @@ class InputBridge:
             self._takeover_travel = 0.0
             self._edge_latched = False
             self._injected_return_latched = False
+            self._edge_armed = False
+            self._remote_return_armed = False
+            if controller == self.self_id and target == self.self_id:
+                # After an edge/remote return, require the user to move the
+                # pointer away from the exit edge before it can trigger again.
+                self._edge_armed = reason != "remote-return"
+            if controller == self.peer_id and target == self.self_id:
+                self._receiving_since = time.monotonic()
         try:
             was_forwarding = previous[0] == self.self_id and previous[1] == self.peer_id
             is_forwarding = controller == self.self_id and target == self.peer_id
@@ -317,33 +330,41 @@ class InputBridge:
         margin = SCREEN_EDGE_MARGIN_PX
         at_edge = False
         outward = False
+        distance = 0
         position = 0.5
         if edge == "left":
             at_edge = event.x <= margin
             outward = event.dx < 0
+            distance = event.x
             position = min(1.0, max(0.0, event.y / max(1, height - 1)))
         elif edge == "right":
             at_edge = event.x >= width - margin - 1
             outward = event.dx > 0
+            distance = width - 1 - event.x
             position = min(1.0, max(0.0, event.y / max(1, height - 1)))
         elif edge == "top":
             at_edge = event.y <= margin
             outward = event.dy < 0
+            distance = event.y
             position = min(1.0, max(0.0, event.x / max(1, width - 1)))
         elif edge == "bottom":
             at_edge = event.y >= height - margin - 1
             outward = event.dy > 0
+            distance = height - 1 - event.y
             position = min(1.0, max(0.0, event.x / max(1, width - 1)))
-        if not at_edge:
-            with self._lock:
-                self._edge_latched = False
-            return
-        if not outward:
-            return
+
         with self._lock:
-            if self._edge_latched:
+            if not at_edge:
+                self._edge_latched = False
+                if distance >= EDGE_REARM_MARGIN_PX:
+                    self._edge_armed = True
                 return
+            if not self._edge_armed or not outward or self._edge_latched:
+                return
+            # One crossing per armed excursion. A subsequent return must move
+            # comfortably away from the edge before another switch can happen.
             self._edge_latched = True
+            self._edge_armed = False
         self._request_focus("edge", edge, position)
 
     def _maybe_recenter(self, event: InputMoveEvent) -> None:
@@ -386,34 +407,45 @@ class InputBridge:
                 self._virtual_pointer = (nx, ny)
                 should_return = False
                 at_edge = False
+                distance = 0
                 if entry_edge is not None:
                     margin = SCREEN_EDGE_MARGIN_PX
                     if entry_edge == "left":
                         at_edge = nx <= margin
+                        distance = nx
                         should_return = at_edge and event.dx < 0
                     elif entry_edge == "right":
                         at_edge = nx >= width - margin - 1
+                        distance = width - 1 - nx
                         should_return = at_edge and event.dx > 0
                     elif entry_edge == "top":
                         at_edge = ny <= margin
+                        distance = ny
                         should_return = at_edge and event.dy < 0
                     elif entry_edge == "bottom":
                         at_edge = ny >= height - margin - 1
+                        distance = height - 1 - ny
                         should_return = at_edge and event.dy > 0
-                if at_edge:
-                    if not self._injected_return_latched:
-                        self._injected_return_latched = True
-                        if should_return:
-                            now = time.monotonic()
-                            self._last_focus_request = now
-                            log.info("Remote cursor left the target edge; returning focus")
-                            try:
-                                self.callbacks.request_focus("return", None, None)
-                            except Exception:  # noqa: BLE001
-                                log.debug("Return focus callback failed", exc_info=True)
-                            return
-                else:
+                if entry_edge is not None and not at_edge:
                     self._injected_return_latched = False
+                    if distance >= REMOTE_RETURN_REARM_MARGIN_PX:
+                        self._remote_return_armed = True
+                if at_edge:
+                    if (
+                        not self._injected_return_latched
+                        and should_return
+                        and self._remote_return_armed
+                        and time.monotonic() - self._receiving_since >= 0.15
+                    ):
+                        self._injected_return_latched = True
+                        self._remote_return_armed = False
+                        self._last_focus_request = time.monotonic()
+                        log.info("Remote cursor left the target edge; returning focus")
+                        try:
+                            self.callbacks.request_focus("return", None, None)
+                        except Exception:  # noqa: BLE001
+                            log.debug("Return focus callback failed", exc_info=True)
+                        return
                 del ratio_x, ratio_y, epoch
         try:
             self.backend.inject(event)

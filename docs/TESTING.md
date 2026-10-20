@@ -31,7 +31,7 @@ egallash xavfli.
 Joriy natija (macOS 27, arm64):
 
 ```
-45 passed
+46 passed
 ```
 
 ## 2. Qo‘lda tekshirilgan (bu loyihada)
@@ -54,7 +54,7 @@ Joriy natija (macOS 27, arm64):
 ### Tayyorgarlik
 
 - Bir xil LAN, client isolation o‘chirilgan.
-- Ikkala qurilmada ToRexLink 1.0.0.
+- Ikkala qurilmada ToRexLink 1.0.1.
 - Windows firewall ruxsati berilgan.
 - macOS ruxsatlari berilgan va ilova qayta ochilgan.
 

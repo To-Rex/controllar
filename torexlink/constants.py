@@ -7,7 +7,7 @@ Never change them without a protocol/format migration.
 from __future__ import annotations
 
 APP_NAME = "ToRexLink"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 APP_BUNDLE_ID = "uz.torexlink.app"
 PROTOCOL_VERSION = 1
 

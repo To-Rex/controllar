@@ -21,6 +21,8 @@ class FakeInputBackend:
         self.injected: list[InputEvent] = []
         self.cursor_visible = True
         self.cursor = (100, 100)
+        self.pointer_frozen = False
+        self.freeze_calls = 0
         self.started = False
 
     def preflight(self) -> InputPermissions:
@@ -62,6 +64,12 @@ class FakeInputBackend:
 
     def set_cursor_visible(self, visible: bool) -> None:
         self.cursor_visible = visible
+
+    def set_pointer_frozen(self, frozen: bool) -> None:
+        self.pointer_frozen = frozen
+
+    def freeze_pointer_motion(self) -> None:
+        self.freeze_calls += 1
 
     def release_injected_keys(self) -> None:
         return None

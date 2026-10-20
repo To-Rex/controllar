@@ -255,6 +255,9 @@ class MacOSInputBackend:
                 self._ready.set()
 
     def stop(self) -> None:
+        # Never leave the system mouse frozen, even if start() failed midway.
+        with contextlib.suppress(Exception):
+            self.set_pointer_frozen(False)
         if not self._started:
             return
         self._started = False
@@ -656,8 +659,38 @@ class MacOSInputBackend:
         x = max(0, min(width - 1, int(x)))
         y = max(0, min(height - 1, int(y)))
         Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+        self._pointer_frozen = False
         Quartz.CGWarpMouseCursorPosition(Quartz.CGPointMake(x, y))
         self._last_physical_pointer = (float(x), float(y))
+
+    def set_pointer_frozen(self, frozen: bool) -> None:
+        """Mark the local pointer as frozen and park it in the centre.
+
+        We deliberately do not use CGAssociateMouseAndMouseCursorPosition(False):
+        if the process dies while disassociated, macOS leaves the physical mouse
+        frozen. Instead the event path calls freeze_pointer_motion() for every
+        forwarded movement and warps the local pointer back immediately. Warping
+        generates no mouse events and keeps raw deltas flowing to the peer.
+        """
+        with self._lock:
+            self._pointer_frozen = frozen
+            if frozen:
+                width, height = self.screen_size()
+                Quartz.CGWarpMouseCursorPosition(
+                    Quartz.CGPointMake(width // 2, height // 2)
+                )
+                self._last_physical_pointer = (float(width // 2), float(height // 2))
+
+    def freeze_pointer_motion(self) -> None:
+        """Undo the cursor motion that OS delivers before tap suppression."""
+        with self._lock:
+            if not self._pointer_frozen:
+                return
+            width, height = self.screen_size()
+            Quartz.CGWarpMouseCursorPosition(
+                Quartz.CGPointMake(width // 2, height // 2)
+            )
+            self._last_physical_pointer = (float(width // 2), float(height // 2))
 
     def pointer_position(self) -> tuple[int, int]:
         with contextlib.suppress(Exception):

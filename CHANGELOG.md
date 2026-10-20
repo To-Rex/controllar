@@ -4,6 +4,21 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.4] — 2026-10-20
+
+### Fixed
+
+- Mac Windows’ni boshqarayotganda lokal kursor endi ko‘rinadigan tarzda
+  siljimaydi. Har bir forwarding mouse event’idan keyin lokal pointer
+  `CGWarpMouseCursorPosition` bilan markazga qaytariladi; bu warp qo‘shimcha
+  event yaratmaydi.
+- `CGAssociateMouseAndMouseCursorPosition(False)` ishlatilmaydi: u crash
+  bo‘lganda butun macOS sichqonchasini qotirib qo‘yishi mumkin edi. Warp usuli
+  xavfsiz va Windows’ga deltalar uzluksiz boradi.
+- Passive/idle kompyuter kursori ham yashirilgan va qotirilgan holatda qoladi.
+- Regressiya testi har bir forwarding move’da `freeze_pointer_motion`
+  chaqirilishini tekshiradi.
+
 ## [1.0.3] — 2026-10-20
 
 ### Fixed

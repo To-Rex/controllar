@@ -56,6 +56,10 @@ class InputBackend(Protocol):
 
     def set_cursor_visible(self, visible: bool) -> None: ...
 
+    def set_pointer_frozen(self, frozen: bool) -> None:
+        """Optionally decouple the local pointer from physical motion."""
+        return None
+
     def release_injected_keys(self) -> None: ...
 
     def release_local_modifiers(self) -> None: ...

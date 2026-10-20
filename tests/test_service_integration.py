@@ -147,6 +147,7 @@ async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) ->
             InputMoveEvent(dx=0.01, dy=0.0, x=500, y=500)
         )
         assert move_suppressed is True  # sender freezes its local pointer
+        assert guest_backend.freeze_calls > 0
         await wait_for(lambda: len(host_backend.injected) > 0)
         assert any(isinstance(item, InputMoveEvent) for item in host_backend.injected)
 
@@ -165,9 +166,10 @@ async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) ->
         assert suppressed is True
         await wait_for(lambda: host.snapshot().focus.local_target is True)
         await wait_for(lambda: guest.snapshot().focus.local_controller is False)
-        # The now-idle guest hides its pointer as well; only the active
-        # computer should show a cursor.
+        # The now-idle guest hides and freezes its pointer as well; only the
+        # active computer should show a cursor.
         await wait_for(lambda: guest_backend.cursor_visible is False)
+        await wait_for(lambda: guest_backend.pointer_frozen is True)
     finally:
         await guest.stop()
         await host.stop()

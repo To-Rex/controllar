@@ -139,8 +139,10 @@ class InputBridge:
                     self.backend.release_local_modifiers()
                     width, height = self.backend.screen_size()
                     self.backend.warp_pointer(width // 2, height // 2)
+                self._set_pointer_frozen(True)
                 self._set_cursor_visible(False)
             elif is_receiving:
+                self._set_pointer_frozen(False)
                 self._set_cursor_visible(True)
                 if entry_edge is not None:
                     self._warp_to_entry(entry_edge, position if position is not None else 0.5)
@@ -153,6 +155,7 @@ class InputBridge:
                 )
                 self.backend.release_local_modifiers()
             elif is_local_active:
+                self._set_pointer_frozen(False)
                 self._set_cursor_visible(True)
                 if previous[0] == self.peer_id or previous[1] == self.peer_id:
                     self.backend.release_injected_keys()
@@ -162,8 +165,10 @@ class InputBridge:
                     self._restore_pointer(inset=False)
             else:
                 # This machine is idle while the peer uses its own local
-                # input. Hide its pointer too, otherwise both computers appear
-                # to have live cursors; a click/key/hotkey reveals it again.
+                # input. Hide and freeze its pointer too, otherwise both
+                # computers appear to have live cursors; a click/key/hotkey
+                # reveals it again.
+                self._set_pointer_frozen(True)
                 self._set_cursor_visible(False)
                 if previous[1] == self.self_id and previous[0] == self.peer_id:
                     self.backend.release_injected_keys()
@@ -210,6 +215,7 @@ class InputBridge:
         # idle computer).
         with self._lock:
             cursor_visible = self._target == self.self_id
+        self._set_pointer_frozen(not cursor_visible)
         self._set_cursor_visible(cursor_visible)
         log.info("Native input backend started: %s", self.backend.name)
 
@@ -218,6 +224,8 @@ class InputBridge:
             # apply_focus() may have hidden the cursor before start() failed.
             with contextlib.suppress(Exception):
                 self.backend.stop()
+            with contextlib.suppress(Exception):
+                self.backend.set_pointer_frozen(False)
             with contextlib.suppress(Exception):
                 self.backend.set_cursor_visible(True)
             self._cursor_hidden = False
@@ -230,6 +238,8 @@ class InputBridge:
                 self.backend.release_injected_keys()
                 self.backend.release_local_modifiers()
             finally:
+                with contextlib.suppress(Exception):
+                    self.backend.set_pointer_frozen(False)
                 self._set_cursor_visible(True)
         log.info("Native input backend stopped")
 
@@ -285,6 +295,10 @@ class InputBridge:
                 )
                 if not freeze_local:
                     self._maybe_recenter(event)
+                frozen_motion = getattr(self.backend, "freeze_pointer_motion", None)
+                if frozen_motion is not None:
+                    with contextlib.suppress(Exception):
+                        frozen_motion()
                 ensure_hidden = getattr(self.backend, "ensure_cursor_hidden", None)
                 if ensure_hidden is not None:
                     with contextlib.suppress(Exception):
@@ -526,6 +540,13 @@ class InputBridge:
             else:
                 pointer = (pointer[0], max(0, height - 25))
         self.backend.warp_pointer(pointer[0], pointer[1])
+
+    def _set_pointer_frozen(self, frozen: bool) -> None:
+        with self._backend_lock:
+            try:
+                self.backend.set_pointer_frozen(frozen)
+            except Exception:  # noqa: BLE001
+                log.debug("Pointer freeze update failed", exc_info=True)
 
     def _set_cursor_visible(self, visible: bool) -> None:
         with self._backend_lock:

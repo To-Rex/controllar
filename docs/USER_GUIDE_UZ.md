@@ -62,7 +62,8 @@ autentifikatsiya qilinadi.
   yoki ikkinchi kompyuterda sichqoncha tugmasini bosing / klaviatura tugmasini
   bosing.
 - Boshqa kompyuterda ishlayotganda bu kompyuterning kursori yashiriladi va
-  qotiriladi; ekranda faqat faol kompyuter kursori harakatlanadi.
+  har bir harakatdan keyin markazga qaytariladi; ekranda faqat faol kompyuter
+  kursori harakatlanadi.
 - Qaytganingizdan so‘ng tasodifiy “sakrash” bo‘lmasligi uchun kursor chetdan
   kamida 56 px ichkariga surilishi kerak — shundan keyin keyingi o‘tish
   faollashadi.

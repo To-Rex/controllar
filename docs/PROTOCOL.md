@@ -250,6 +250,19 @@ A ping is sent every 10 s; no data/pong for 32 s closes the session.
 - Remote-applied values are not echoed back.
 - Only text is transmitted.
 
+### Remote logs
+
+```json
+{"v":1,"type":"log_request","request_id":"<16 hex>","max_bytes":262144}
+{"v":1,"type":"log_response","request_id":"<16 hex>","text":"...","truncated":false,"device":"DESKTOP-1","version":"1.0.5"}
+```
+
+- Only available between authenticated 1.0.5 peers.
+- Response text is UTF-8 ≤ 256 KiB.
+- Requests are rate-limited to one per 2 s; the requester waits at most 10 s.
+- Logs are secret-redacted by the logging layer. Device names, LAN addresses,
+  file paths and error details may still appear.
+
 ### Close / errors
 
 ```json

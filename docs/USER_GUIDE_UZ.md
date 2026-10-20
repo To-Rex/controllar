@@ -163,6 +163,9 @@ turadi. Oddiy foydalanuvchi ularni o‘zgartirishi shart emas.
 
 - **Loglar** — ulanish, xavfsizlik va xatolar tarixi. Tokens/kodlar/clipboard
   yozilmaydi.
+- **Boshqa qurilma loglari** — faol ulanishda ikkinchi kompyuterdan loglarni
+  xavfsiz TLS sessiyasi orqali olib keladi. Ikkala qurilmada 1.0.5 bo‘lishi
+  kerak. Log lokal `logs/remote-<peer>.log` fayliga ham saqlanadi.
 - **Diagnostika** — ruxsatlar, sertifikat, TLS, mDNS, firewall, port va
   oxirgi xato. Hisobotni nusxalash yoki faylga saqlash mumkin.
 
@@ -171,6 +174,8 @@ turadi. Oddiy foydalanuvchi ularni o‘zgartirishi shart emas.
 - Kodni faqat ishonchli odamga ayting; QR’ni skrinshot qilib boshqalarga
   yubormang.
 - Har bir juftlikni faqat o‘zingiz nazorat qiladigan qurilmalar bilan yarating.
+  Juftlangan qurilma sizning loglaringizning oxirgi qismini so‘rashi mumkin
+  (256 KiB, redaksiya qilingan).
 - Ishonchsiz umumiy Wi‑Fi’da juftlik yaratmang.
 - Ishlatilmayotgan juftliklarni **Qurilmalar → O‘chirish** orqali olib tashlang.
 - Yangi noma’lum ulanish bildirishnomasini ko‘rsangiz, darhol barcha

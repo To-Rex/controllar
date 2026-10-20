@@ -219,6 +219,10 @@ roziligisiz firewall o‘zgartirish **taqiqlanadi**.
   auditi talab qilinsa, vetted constant-time guruh implementatsiyasiga
   o‘tish tavsiya etiladi.
 - IPv6 listener hozircha qo‘llanmaydi; LAN IPv4 ishlatiladi.
+- Juftlangan qurilma autentifikatsiyalangan sessiya orqali loglarning oxirgi
+  256 KiB qismini so‘rashi mumkin. Loglar maxfiy qiymatlarni redaksiya qiladi,
+  ammo qurilma nomi, IP manzil, fayl yo‘li va xato tafsilotlari ko‘rinishi
+  mumkin. Faqat ishonchli qurilmalar bilan juftlaning.
 
 ## 13. Zaiflik haqida xabar berish
 

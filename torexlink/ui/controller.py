@@ -369,6 +369,13 @@ class ToRexLinkController(QObject):
     def clear_peers(self, on_success=None, on_error=None) -> None:
         self.run_coro(self.service.clear_peers(), on_success=on_success, on_error=on_error)
 
+    def fetch_remote_logs(self, on_success=None, on_error=None) -> None:
+        self.run_coro(
+            self.service.request_remote_logs(),
+            on_success=on_success,
+            on_error=on_error,
+        )
+
     # ------------------------------------------------------------------ settings
     def update_settings(
         self,

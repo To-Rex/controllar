@@ -9,18 +9,31 @@ from ..constants import (
     CLIPBOARD_MAX_BYTES,
     EDGES,
     FOCUS_ACTIONS,
+    LOG_SHARE_MAX_BYTES,
     MAX_DEVICE_NAME,
     PROTOCOL_VERSION,
 )
 from ..util import clamp
 
 _ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_LOG_REQUEST_RE = re.compile(r"^[0-9a-f]{16}$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 _MODS = frozenset({"ctrl", "alt", "shift", "meta", "caps"})
 _EVENT_TYPES = frozenset({"key", "move", "button", "wheel"})
 _MESSAGE_TYPES = frozenset(
-    {"ping", "pong", "input", "focus_request", "focus_state", "clipboard", "bye", "error"}
+    {
+        "ping",
+        "pong",
+        "input",
+        "focus_request",
+        "focus_state",
+        "clipboard",
+        "log_request",
+        "log_response",
+        "bye",
+        "error",
+    }
 )
 
 
@@ -170,6 +183,42 @@ def _validate_message(message: dict[str, Any]) -> dict[str, Any]:
             "reason": reason,
             "entry_edge": entry_edge,
             "position": position,
+        }
+    if message_type == "log_request":
+        request_id = message.get("request_id")
+        if not isinstance(request_id, str) or not _LOG_REQUEST_RE.fullmatch(request_id):
+            raise ProtocolError("invalid log request id")
+        max_bytes = _require_int(message.get("max_bytes"), "log max_bytes", 1024, LOG_SHARE_MAX_BYTES)
+        return {
+            "v": PROTOCOL_VERSION,
+            "type": "log_request",
+            "request_id": request_id,
+            "max_bytes": max_bytes,
+        }
+    if message_type == "log_response":
+        request_id = message.get("request_id")
+        if not isinstance(request_id, str) or not _LOG_REQUEST_RE.fullmatch(request_id):
+            raise ProtocolError("invalid log response id")
+        text = message.get("text")
+        if not isinstance(text, str):
+            raise ProtocolError("log text must be a string")
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ProtocolError("log text is not valid Unicode") from exc
+        if len(encoded) > LOG_SHARE_MAX_BYTES:
+            raise ProtocolError("log text too large")
+        truncated = message.get("truncated", False)
+        if not isinstance(truncated, bool):
+            raise ProtocolError("log truncated must be boolean")
+        return {
+            "v": PROTOCOL_VERSION,
+            "type": "log_response",
+            "request_id": request_id,
+            "text": text,
+            "truncated": truncated,
+            "device": _require_short_str(message.get("device"), "log device", 64),
+            "version": _require_short_str(message.get("version"), "log version", 32),
         }
     if message_type == "clipboard":
         text = message.get("text")

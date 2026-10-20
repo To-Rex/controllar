@@ -4,6 +4,28 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.5] — 2026-10-20
+
+### Changed
+
+- Kursor kompyuterlar o‘rtasida o‘tganda **hech qanday OS notification yoki
+  ilova banneri ko‘rsatilmaydi**. Fokus holati faqat sidebar va tray’da
+  jim ko‘rsatiladi — bitta kompyuter hissi saqlanadi.
+
+### Added
+
+- **Boshqa qurilma loglari**: `Loglar` sahifasida tugma orqali juftlangan
+  kompyuterdan autentifikatsiyalangan TLS sessiyasi ichida log olib kelinadi.
+  Log 256 KiB bilan cheklangan, maxfiy ma’lumotlar redaksiya qilinadi va
+  lokal `logs/remote-<peer>.log` fayliga saqlanadi.
+- Yangi `log_request` / `log_response` protokol xabarlari; 2 sekundlik
+  rate-limit va 10 sekundlik timeout.
+- Remote loglarni ko‘rish, nusxalash va saqlash oynasi.
+
+### Notes
+
+- Remote loglar faqat ikkala qurilmada 1.0.5 bo‘lsa ishlaydi.
+
 ## [1.0.4] — 2026-10-20
 
 ### Fixed

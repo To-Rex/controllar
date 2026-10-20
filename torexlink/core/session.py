@@ -35,6 +35,8 @@ class SessionCallbacks:
     on_clipboard: Callable[[str, str, str], None]
     on_focus_request: FocusCallback
     on_focus_state: FocusCallback
+    on_log_request: FocusCallback
+    on_log_response: FocusCallback
     on_closed: Callable[[PeerSession, str], None]
 
 
@@ -165,6 +167,37 @@ class PeerSession:
                 "reason": state["reason"],
                 "entry_edge": state["entry_edge"],
                 "position": state["position"],
+            }
+        )
+
+    async def send_log_request(self, request_id: str, max_bytes: int) -> None:
+        await self.send(
+            {
+                "v": PROTOCOL_VERSION,
+                "type": "log_request",
+                "request_id": request_id,
+                "max_bytes": max_bytes,
+            }
+        )
+
+    async def send_log_response(
+        self,
+        request_id: str,
+        text: str,
+        *,
+        truncated: bool,
+        device: str,
+        version: str,
+    ) -> None:
+        await self.send(
+            {
+                "v": PROTOCOL_VERSION,
+                "type": "log_response",
+                "request_id": request_id,
+                "text": text,
+                "truncated": truncated,
+                "device": device,
+                "version": version,
             }
         )
 
@@ -331,6 +364,18 @@ class PeerSession:
         if message_type == "focus_state":
             with contextlib.suppress(Exception):
                 result = self.callbacks.on_focus_state(message)
+                if inspect.isawaitable(result):
+                    await result
+            return
+        if message_type == "log_request":
+            with contextlib.suppress(Exception):
+                result = self.callbacks.on_log_request(message)
+                if inspect.isawaitable(result):
+                    await result
+            return
+        if message_type == "log_response":
+            with contextlib.suppress(Exception):
+                result = self.callbacks.on_log_response(message)
                 if inspect.isawaitable(result):
                     await result
             return

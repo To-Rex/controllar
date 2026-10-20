@@ -7,13 +7,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from torexlink.core.service import ToRexLinkService  # noqa: E402
+from torexlink.constants import APP_VERSION  # noqa: E402
+from torexlink.core.service import RemoteLogs, ToRexLinkService  # noqa: E402
 from torexlink.paths import AppPaths  # noqa: E402
 from torexlink.settings import SettingsStore  # noqa: E402
 from torexlink.ui.controller import ToRexLinkController  # noqa: E402
 from torexlink.ui.dialogs import JoinDialog, decode_qr_file  # noqa: E402
 from torexlink.ui.main_window import MainWindow  # noqa: E402
 from torexlink.ui.onboarding import OnboardingDialog  # noqa: E402
+from torexlink.ui.pages.logs import RemoteLogsDialog  # noqa: E402
 from torexlink.ui.theme import build_stylesheet  # noqa: E402
 
 
@@ -74,6 +76,27 @@ def test_pages_language_theme_and_dialogs(qapp, tmp_path, monkeypatch) -> None:
         join._busy = False
         join.close()
         join.deleteLater()
+
+        remote_path = tmp_path / "remote-peer.log"
+        remote_path.write_text("REMOTE-LOG-LINE\n", encoding="utf-8")
+        remote_dialog = RemoteLogsDialog(
+            controller,
+            RemoteLogs(
+                peer_name="Peer",
+                app_version=APP_VERSION,
+                text="REMOTE-LOG-LINE\n",
+                truncated=False,
+                saved_path=remote_path,
+            ),
+            window,
+        )
+        remote_dialog.show()
+        qapp.processEvents()
+        assert "REMOTE-LOG-LINE" in remote_dialog.view.toPlainText()
+        remote_dialog.grab()
+        remote_dialog.close()
+        remote_dialog.deleteLater()
+        assert window.focus_banner.isHidden()
 
         onboarding = OnboardingDialog(controller)
         onboarding.show()

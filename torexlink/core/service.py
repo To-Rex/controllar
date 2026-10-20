@@ -18,12 +18,16 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..constants import (
     APP_VERSION,
     DEFAULT_PORT,
     FOCUS_ACTIONS,
+    LOG_SHARE_COOLDOWN_SECONDS,
+    LOG_SHARE_MAX_BYTES,
+    LOG_SHARE_TIMEOUT_SECONDS,
     RECONNECT_DELAYS,
     RECONNECT_JITTER,
 )
@@ -31,6 +35,7 @@ from ..input.base import InputBackend
 from ..input.bridge import InputBridge, InputBridgeCallbacks
 from ..input.events import InputMoveEvent, event_from_wire
 from ..input.factory import create_input_backend
+from ..logging_setup import read_log_tail
 from ..pairing_payload import PairingPayload, PairingPayloadError
 from ..paths import AppPaths
 from ..peers import PeerRecord, PeerStore
@@ -43,7 +48,7 @@ from ..protocol.handshake import (
 from ..protocol.models import ProtocolError
 from ..security.identity import Identity, short_fingerprint
 from ..settings import Settings, SettingsStore
-from ..util import backoff_delay, iso_now
+from ..util import atomic_write_text, backoff_delay, iso_now
 from .auth import AuthenticatedLink, ReconnectAuthError, client_auth_exchange, server_auth_exchange
 from .clipboard import ClipboardSync, NativeClipboard, create_native_clipboard
 from .discovery import DiscoveredDevice, DiscoveryService, local_ipv4_addresses
@@ -71,6 +76,15 @@ from .state import (
 from .transport import TransportError, receive_hello
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteLogs:
+    peer_name: str
+    app_version: str
+    text: str
+    truncated: bool
+    saved_path: Path
 
 
 class ServiceError(RuntimeError):
@@ -157,6 +171,8 @@ class ToRexLinkService:
         self._auth_failures: dict[str, deque[float]] = {}
         self._auth_blocked_until: dict[str, float] = {}
         self._last_focus_request = 0.0
+        self._log_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._last_log_share_time = 0.0
         self._last_snapshot: ServiceSnapshot | None = None
         self._last_peer_id: str | None = None
 
@@ -276,6 +292,7 @@ class ToRexLinkService:
         self._pairing_manager.cancel()
         await self._stop_discovery()
         await self._stop_hosting()
+        self._fail_log_waiters()
         self._focus = None
         self._focus_authority = None
         self._notify("stopped")
@@ -667,6 +684,106 @@ class ToRexLinkService:
             self._status_override = None
             self._notify("pairing")
 
+    # --------------------------------------------------------------- remote logs
+    async def request_remote_logs(self, max_bytes: int = LOG_SHARE_MAX_BYTES) -> RemoteLogs:
+        """Fetch a bounded, secret-redacted log tail from the paired computer."""
+        self._ensure_running()
+        active = self._active
+        if active is None or active.session.closed:
+            raise ServiceError("not_connected")
+        if active.app_version != APP_VERSION:
+            raise ServiceError("peer_unsupported")
+        if max_bytes < 1024 or max_bytes > LOG_SHARE_MAX_BYTES:
+            raise ServiceError("invalid_request")
+        now = time.monotonic()
+        if now - self._last_log_share_time < LOG_SHARE_COOLDOWN_SECONDS:
+            raise ServiceError("rate_limited")
+        self._last_log_share_time = now
+        request_id = secrets.token_hex(8)
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._log_waiters[request_id] = future
+        try:
+            try:
+                await active.session.send_log_request(request_id, max_bytes)
+            except TransportError as exc:
+                raise ServiceError("remote_logs_failed") from exc
+            try:
+                response = await asyncio.wait_for(future, timeout=LOG_SHARE_TIMEOUT_SECONDS)
+            except TimeoutError as exc:
+                raise ServiceError("remote_logs_timeout") from exc
+        finally:
+            self._log_waiters.pop(request_id, None)
+        if self._active is not active:
+            raise ServiceError("not_connected")
+        text = str(response.get("text", ""))
+        truncated = bool(response.get("truncated", False))
+        header = (
+            f"# ToRexLink remote log\n"
+            f"# Peer: {active.peer.name} ({response.get('device', active.peer.name)})\n"
+            f"# Version: {response.get('version', active.app_version)}\n"
+            f"# Retrieved: {iso_now()}\n"
+            f"# Truncated: {truncated}\n\n"
+        )
+        saved_path = self.paths.logs_dir / f"remote-{active.peer.peer_id[:8]}.log"
+        await asyncio.to_thread(atomic_write_text, saved_path, header + text)
+        return RemoteLogs(
+            peer_name=active.peer.name,
+            app_version=str(response.get("version", active.app_version)),
+            text=text,
+            truncated=truncated,
+            saved_path=saved_path,
+        )
+
+    async def _on_remote_log_request(self, message: dict[str, Any]) -> None:
+        active = self._active
+        if active is None or active.session.closed:
+            return
+        now = time.monotonic()
+        if now - self._last_log_share_time < LOG_SHARE_COOLDOWN_SECONDS:
+            return
+        self._last_log_share_time = now
+        max_bytes = min(int(message.get("max_bytes", LOG_SHARE_MAX_BYTES)), LOG_SHARE_MAX_BYTES)
+        payload = await asyncio.to_thread(self._read_local_log_for_share, max_bytes)
+        text, truncated = payload
+        try:
+            await active.session.send_log_response(
+                str(message["request_id"]),
+                text,
+                truncated=truncated,
+                device=self.local_name,
+                version=APP_VERSION,
+            )
+        except TransportError:
+            return
+
+    def _read_local_log_for_share(self, max_bytes: int) -> tuple[str, bool]:
+        text = read_log_tail(self.paths.log_file, max_lines=4000)
+        raw = text.encode("utf-8", "replace")
+        truncated = len(raw) > max_bytes
+        if truncated:
+            # Keep the newest part and never split a UTF-8 sequence.
+            text = raw[-max_bytes:].decode("utf-8", "ignore")
+        return text, truncated
+
+    def _on_remote_log_response(self, message: dict[str, Any]) -> None:
+        future = self._log_waiters.get(str(message.get("request_id", "")))
+        if future is None or future.done():
+            return
+        future.set_result(
+            {
+                "text": str(message.get("text", "")),
+                "truncated": bool(message.get("truncated", False)),
+                "device": str(message.get("device", "")),
+                "version": str(message.get("version", "")),
+            }
+        )
+
+    def _fail_log_waiters(self) -> None:
+        for future in list(self._log_waiters.values()):
+            if not future.done():
+                future.set_exception(ServiceError("connection_lost"))
+        self._log_waiters.clear()
+
     # ------------------------------------------------------------- connections
     async def _handle_incoming(self, stream: Any) -> None:
         peer_ip = stream.peername[0]
@@ -777,6 +894,8 @@ class ToRexLinkService:
             on_clipboard=self._on_remote_clipboard,
             on_focus_request=self._on_focus_request,
             on_focus_state=self._on_focus_state,
+            on_log_request=self._on_remote_log_request,
+            on_log_response=self._on_remote_log_response,
             on_closed=self._on_session_closed,
         )
 
@@ -1268,6 +1387,7 @@ class ToRexLinkService:
         self._active_generation += 1
         self._focus = None
         self._focus_authority = None
+        self._fail_log_waiters()
         asyncio.create_task(
             self._finalize_closed_session(active, reason),
             name="ToRexLink-SessionCleanup",
@@ -1700,4 +1820,4 @@ def iso_now_from_epoch(epoch: float | None) -> str | None:
         return None
 
 
-__all__ = ["ServiceError", "ServiceEvent", "ServiceSnapshot", "ToRexLinkService"]
+__all__ = ["RemoteLogs", "ServiceError", "ServiceEvent", "ServiceSnapshot", "ToRexLinkService"]

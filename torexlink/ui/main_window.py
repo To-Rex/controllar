@@ -21,11 +21,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..constants import APP_VERSION, HOTKEY_LABEL
+from ..constants import APP_VERSION
 from ..core.state import ServiceEvent, ServiceSnapshot
 from ..i18n import UZ
 from .controller import ToRexLinkController
-from .icons import icon, logo_icon, logo_pixmap, pixmap
+from .icons import icon, logo_icon, logo_pixmap
 from .pages.connect import ConnectPage
 from .pages.devices import DevicesPage
 from .pages.diagnostics import DiagnosticsPage
@@ -34,7 +34,6 @@ from .pages.logs import LogsPage
 from .pages.settings import SettingsPage
 from .theme import Palette, build_stylesheet, palette_for, resolve_theme
 from .widgets import (
-    ACCENT,
     AMBER,
     DANGER,
     MINT,
@@ -309,7 +308,7 @@ class MainWindow(QWidget):
         self.focus_wrapper.hide()
         self.startup_banner.show()
         self.permission_banner.show()
-        self.focus_banner.show()
+        self.focus_banner.hide()
         self.toast = Toast(self)
         self.setStyleSheet("")
 
@@ -529,36 +528,18 @@ class MainWindow(QWidget):
             self.focus_sidebar.hide()
 
     def _update_focus_banner(self) -> None:
+        # Focus changes are intentionally silent: the service is meant to feel
+        # like one computer and must not pop notifications when the cursor
+        # crosses to the other screen. The sidebar/tray still show the state.
+        self.focus_banner.hide()
+        self.focus_wrapper.hide()
         focus = self._snapshot.focus
         connection = self._snapshot.connection
-        if focus is None or connection is None:
-            self.focus_banner.hide()
-            self.focus_wrapper.hide()
-            self._last_focus_signature = None
-            return
-        t = self.controller.translator.t
-        if focus.local_controller and focus.local_target:
-            self.focus_banner.hide()
-            self.focus_wrapper.hide()
-            self._last_focus_signature = (focus.local_controller, focus.local_target, connection.peer_id)
-            return
-        if not focus.local_controller and focus.local_target:
-            title = t("focus_banner_peer_controls").format(peer=focus.controller_name)
-            text = t("focus_banner_takeover_hint")
-            level, icon_name = "warning", "cursor"
-        elif focus.local_controller:
-            title = t("focus_banner_you_control").format(peer=focus.target_name)
-            text = t("focus_banner_return_hint").format(hotkey=HOTKEY_LABEL)
-            level, icon_name = "success", "switch"
-        else:
-            title = t("focus_banner_other")
-            text = t("focus_banner_other_hint")
-            level, icon_name = "warning", "info"
-        self.focus_banner.set_content(title=title, text=text, level=level)
-        self.focus_banner.icon.setPixmap(pixmap(icon_name, ACCENT if level == "success" else AMBER, 17))
-        self.focus_banner.show()
-        self.focus_wrapper.show()
-        self._last_focus_signature = (focus.local_controller, focus.local_target, connection.peer_id)
+        self._last_focus_signature = (
+            (focus.local_controller, focus.local_target, connection.peer_id)
+            if focus is not None and connection is not None
+            else None
+        )
 
     def _update_window_title(self) -> None:
         if self._snapshot.connection:
@@ -615,16 +596,6 @@ class MainWindow(QWidget):
         elif kind == "clipboard_skipped":
             if visible and event.data.get("reason") == "too_large":
                 self.show_toast(t("toast_clipboard_too_large"), "info")
-        elif kind == "focus":
-            focus = snapshot.focus
-            if focus and focus.local_target and not focus.local_controller and not visible:
-                self._send_notification(
-                    t("notify_focus_remote_title"),
-                    t("notify_focus_remote_body").format(
-                        peer=focus.controller_name,
-                        hotkey=HOTKEY_LABEL,
-                    ),
-                )
         elif kind == "error" and snapshot.last_error and visible:
             # Avoid duplicate generic errors during normal disconnect/reconnect.
             if not snapshot.connection and snapshot.status == "error":

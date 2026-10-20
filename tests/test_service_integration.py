@@ -366,3 +366,34 @@ async def test_edge_return_disarms_until_pointer_moves_inward(service_factory) -
     finally:
         await guest.stop()
         await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_remote_logs_are_exchanged_and_saved(service_factory) -> None:
+    host, _, _ = service_factory(name="log-host", hosting=True)
+    guest, _, _ = service_factory(name="log-guest", hosting=False)
+    try:
+        await host.start()
+        await guest.start()
+        pairing = await host.begin_pairing()
+        await guest.pair_with_payload(PairingPayload.parse(pairing.qr_uri))
+        await wait_for(lambda: guest.snapshot().connection is not None)
+        await wait_for(lambda: host.snapshot().connection is not None)
+
+        host.paths.log_file.write_text("HOST-REMOTE-LOG-MARKER\n", encoding="utf-8")
+        guest.paths.log_file.write_text("GUEST-REMOTE-LOG-MARKER\n", encoding="utf-8")
+
+        remote_host = await guest.request_remote_logs()
+        assert "HOST-REMOTE-LOG-MARKER" in remote_host.text
+        assert remote_host.saved_path.exists()
+        assert "HOST-REMOTE-LOG-MARKER" in remote_host.saved_path.read_text(encoding="utf-8")
+
+        # The peer served a request, so respect the shared share-cooldown
+        # before making the reverse request.
+        await asyncio.sleep(2.1)
+        remote_guest = await host.request_remote_logs()
+        assert "GUEST-REMOTE-LOG-MARKER" in remote_guest.text
+        assert "GUEST-REMOTE-LOG-MARKER" in remote_guest.saved_path.read_text(encoding="utf-8")
+    finally:
+        await guest.stop()
+        await host.stop()

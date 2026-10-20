@@ -95,3 +95,35 @@ def test_clipboard_digest_enforced() -> None:
     message["sha256"] = "b" * 64
     with pytest.raises(ProtocolError):
         validate_peer_message(message)
+
+
+def test_log_exchange_message_validation() -> None:
+    request = {
+        "v": 1,
+        "type": "log_request",
+        "request_id": "0123456789abcdef",
+        "max_bytes": 65536,
+    }
+    normalized = validate_peer_message(request)
+    assert normalized["max_bytes"] == 65536
+
+    response = {
+        "v": 1,
+        "type": "log_response",
+        "request_id": "0123456789abcdef",
+        "text": "line one\nline two\n",
+        "truncated": False,
+        "device": "Test Mac",
+        "version": "1.0.5",
+    }
+    assert validate_peer_message(response)["text"].startswith("line one")
+
+    for broken in (
+        {**request, "request_id": "not-hex"},
+        {**request, "max_bytes": 0},
+        {**request, "max_bytes": 10**9},
+        {**response, "truncated": "no"},
+        {**response, "text": "x" * (256 * 1024 + 1)},
+    ):
+        with pytest.raises(ProtocolError):
+            validate_peer_message(broken)

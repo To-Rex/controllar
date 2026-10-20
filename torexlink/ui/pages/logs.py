@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...constants import APP_VERSION
 from ...logging_setup import read_log_tail
 from ..widgets import (
     Card,
@@ -27,7 +29,71 @@ from ..widgets import (
 )
 
 if TYPE_CHECKING:
+    from ...core.service import RemoteLogs
     from ..controller import ToRexLinkController
+
+
+class RemoteLogsDialog(QDialog):
+    """Read-only viewer for logs fetched from the paired computer."""
+
+    def __init__(
+        self,
+        controller: ToRexLinkController,
+        result: RemoteLogs,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.controller = controller
+        t = controller.translator.t
+        self.setWindowTitle(t("logs_remote_title").format(peer=result.peer_name))
+        self.resize(900, 640)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+        meta = label(
+            f"{result.peer_name} · {result.app_version} · "
+            + t("logs_remote_saved").format(path=result.saved_path),
+            object_name="Faint",
+            wrap=True,
+        )
+        layout.addWidget(meta)
+        if result.truncated:
+            layout.addWidget(label(t("logs_remote_truncated"), object_name="Faint", wrap=True))
+        self.view = QPlainTextEdit()
+        self.view.setObjectName("LogView")
+        self.view.setReadOnly(True)
+        self.view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.view.setPlainText(result.text or t("logs_empty"))
+        layout.addWidget(self.view, 1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        copy_button = make_button(t("copy"), kind="SecondaryButton", icon_name="copy")
+        save_button = make_button(t("save"), kind="SecondaryButton", icon_name="download")
+        close_button = make_button(t("close"), kind="PrimaryButton")
+        copy_button.clicked.connect(self._copy)
+        save_button.clicked.connect(self._save)
+        close_button.clicked.connect(self.accept)
+        for button in (copy_button, save_button, close_button):
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+
+    def _copy(self) -> None:
+        self.controller.copy_text(self.view.toPlainText())
+
+    def _save(self) -> None:
+        t = self.controller.translator.t
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            t("save"),
+            str(Path.home() / "ToRexLink-remote-log.txt"),
+            t("logs_file_filter"),
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.view.toPlainText(), encoding="utf-8")
+        except OSError:
+            pass
 
 
 class LogsPage(QWidget):
@@ -65,10 +131,17 @@ class LogsPage(QWidget):
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(7)
         self.open_button = make_button("", kind="GhostButton", icon_name="folder")
+        self.remote_button = make_button("", kind="SecondaryButton", icon_name="download")
         self.export_button = make_button("", kind="SecondaryButton", icon_name="download")
         self.copy_button = make_button("", kind="SecondaryButton", icon_name="copy")
         self.refresh_button = make_button("", kind="PrimaryButton", icon_name="refresh")
-        for button in (self.open_button, self.export_button, self.copy_button, self.refresh_button):
+        for button in (
+            self.open_button,
+            self.remote_button,
+            self.export_button,
+            self.copy_button,
+            self.refresh_button,
+        ):
             actions.addWidget(button)
         self.header = PageHeader("", "", action=action_row)
         layout.addWidget(self.header)
@@ -98,6 +171,7 @@ class LogsPage(QWidget):
         self.copy_button.clicked.connect(self._copy)
         self.export_button.clicked.connect(self._export)
         self.open_button.clicked.connect(self._open_folder)
+        self.remote_button.clicked.connect(self._fetch_remote)
         self.search.textChanged.connect(self._apply_filter)
 
     def retranslate(self) -> None:
@@ -108,6 +182,7 @@ class LogsPage(QWidget):
         self.copy_button.setText(t("logs_copy"))
         self.export_button.setText(t("logs_export"))
         self.open_button.setText(t("logs_open_folder"))
+        self.remote_button.setText(t("logs_remote"))
         self.search.setPlaceholderText(t("logs_search_placeholder"))
         self.live_pill.setText(t("diagnostic_active"))
         self.caption.setText(t("logs_auto_refresh"))
@@ -156,5 +231,33 @@ class LogsPage(QWidget):
         if not self.controller.open_path(self.controller.service.paths.logs_dir):
             self.toast.emit(self.controller.translator.t("logs_open_error"), "error")
 
+    def _fetch_remote(self) -> None:
+        t = self.controller.translator.t
+        connection = self.controller.snapshot.connection
+        if connection is None:
+            self.toast.emit(t("logs_remote_no_connection"), "info")
+            return
+        if connection.app_version != APP_VERSION:
+            self.toast.emit(t("logs_remote_update_required"), "error")
+            return
+        self.remote_button.setEnabled(False)
+        self.remote_button.setText(t("logs_remote_loading"))
+        self.controller.fetch_remote_logs(self._remote_loaded, self._remote_failed)
 
-__all__ = ["LogsPage"]
+    def _remote_loaded(self, result: object) -> None:
+        t = self.controller.translator.t
+        self.remote_button.setEnabled(True)
+        self.remote_button.setText(t("logs_remote"))
+        text = getattr(result, "text", None)
+        if not isinstance(text, str):
+            self.toast.emit(t("logs_remote_failed"), "error")
+            return
+        RemoteLogsDialog(self.controller, result, self).exec()  # type: ignore[arg-type]
+
+    def _remote_failed(self, error: BaseException) -> None:
+        self.remote_button.setEnabled(True)
+        self.remote_button.setText(self.controller.translator.t("logs_remote"))
+        self.toast.emit(self.controller.error_message(error), "error")
+
+
+__all__ = ["LogsPage", "RemoteLogsDialog"]

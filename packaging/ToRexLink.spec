@@ -107,6 +107,6 @@ if IS_MAC:
         name="ToRexLink.app",
         icon=str(ROOT / "packaging" / "assets" / "ToRexLink.icns"),
         bundle_identifier="uz.torexlink.app",
-        version="1.0.2",
+        version="1.0.3",
         info_plist=info_plist,
     )

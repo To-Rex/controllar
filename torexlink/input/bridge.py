@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
-import math
 import threading
 import time
 from collections.abc import Callable
@@ -18,7 +18,6 @@ from ..constants import (
     REMOTE_RETURN_REARM_MARGIN_PX,
     REMOTE_RETURN_SETTLE_SECONDS,
     SCREEN_EDGE_MARGIN_PX,
-    TAKEOVER_MOVE_THRESHOLD_PX,
 )
 from .base import InputBackend, InputBackendError
 from .events import (
@@ -26,7 +25,6 @@ from .events import (
     InputEvent,
     InputKeyEvent,
     InputMoveEvent,
-    InputWheelEvent,
     event_to_wire,
 )
 
@@ -71,7 +69,6 @@ class InputBridge:
         self._started = False
         self._cursor_hidden = False
         self._saved_pointer: tuple[int, int] | None = None
-        self._takeover_travel = 0.0
         self._edge_latched = False
         self._edge_armed = False
         self._remote_return_armed = False
@@ -120,7 +117,6 @@ class InputBridge:
             self._reason = reason
             self._entry_edge = entry_edge
             self._entry_position = position
-            self._takeover_travel = 0.0
             self._edge_latched = False
             self._injected_return_latched = False
             self._edge_armed = False
@@ -165,7 +161,10 @@ class InputBridge:
                 elif not (previous[0] == self.self_id and previous[1] == self.self_id):
                     self._restore_pointer(inset=False)
             else:
-                self._set_cursor_visible(True)
+                # This machine is idle while the peer uses its own local
+                # input. Hide its pointer too, otherwise both computers appear
+                # to have live cursors; a click/key/hotkey reveals it again.
+                self._set_cursor_visible(False)
                 if previous[1] == self.self_id and previous[0] == self.peer_id:
                     self.backend.release_injected_keys()
             if not is_forwarding and was_forwarding:
@@ -205,11 +204,23 @@ class InputBridge:
             raise InputBackendError(detail or "input permissions are missing")
         self.backend.start(self._handle_capture)
         self._started = True
-        self._set_cursor_visible(True)
+        # apply_focus() already ran before the tap/hook existed. Re-assert the
+        # desired cursor state after the backend is live instead of blindly
+        # showing it (that used to leave a second live-looking cursor on the
+        # idle computer).
+        with self._lock:
+            cursor_visible = self._target == self.self_id
+        self._set_cursor_visible(cursor_visible)
         log.info("Native input backend started: %s", self.backend.name)
 
     def stop(self) -> None:
         if not self._started:
+            # apply_focus() may have hidden the cursor before start() failed.
+            with contextlib.suppress(Exception):
+                self.backend.stop()
+            with contextlib.suppress(Exception):
+                self.backend.set_cursor_visible(True)
+            self._cursor_hidden = False
             return
         self._started = False
         try:
@@ -269,35 +280,38 @@ class InputBridge:
         if forwarding:
             if isinstance(event, InputMoveEvent):
                 self._send(event)
-                self._maybe_recenter(event)
-                # Allowing the hidden local cursor to move gives us continuous
-                # relative deltas on both Windows and macOS. Buttons and keys
-                # remain suppressible and local clicks cannot leak through.
-                return False
+                freeze_local = bool(
+                    getattr(self.backend, "suppress_moves_when_forwarding", False)
+                )
+                if not freeze_local:
+                    self._maybe_recenter(event)
+                ensure_hidden = getattr(self.backend, "ensure_cursor_hidden", None)
+                if ensure_hidden is not None:
+                    with contextlib.suppress(Exception):
+                        ensure_hidden()
+                # macOS can freeze the local pointer because CGEvent carries
+                # raw deltas; keeping the controller cursor stationary makes
+                # the experience feel like one computer. Windows must let its
+                # hidden cursor move to keep receiving deltas.
+                return freeze_local
             self._send(event)
             return True
 
         # Either this computer is currently being driven from the peer, or it
-        # is idle. Native local input is suppressed; physical activity takes
-        # back control. Injected input is handled above and never causes theft.
+        # is idle. Local pointer motion must never steal focus: injected remote
+        # motion can be indistinguishable in timing, and accidental movement
+        # would visibly re-enable this machine's cursor. A deliberate physical
+        # key press, mouse click or the hotkey takes control instead.
         if receiving or passive:
             if isinstance(event, InputMoveEvent):
-                width, _ = self.backend.screen_size()
-                with self._lock:
-                    self._takeover_travel += math.hypot(event.dx * width, event.dy * width)
-                    should_take = (
-                        self._takeover_travel >= TAKEOVER_MOVE_THRESHOLD_PX
-                        and now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS
-                    )
-                    if should_take:
-                        self._takeover_travel = 0.0
-                if should_take:
-                    self._request_focus("takeover", None, None)
-                # Windows reports no useful movement delta if the low-level
-                # hook blocks the move, so its hidden cursor must be allowed to
-                # move. macOS provides raw deltas and stays fully suppressed.
+                ensure_hidden = getattr(self.backend, "ensure_cursor_hidden", None)
+                if ensure_hidden is not None:
+                    with contextlib.suppress(Exception):
+                        ensure_hidden()
+                # Windows only reports useful deltas while its hidden cursor is
+                # allowed to move; macOS stays fully frozen.
                 return bool(getattr(self.backend, "suppress_moves_when_passive", True))
-            elif isinstance(event, (InputKeyEvent, InputButtonEvent, InputWheelEvent)):
+            if isinstance(event, (InputKeyEvent, InputButtonEvent)):
                 if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
                     self._request_focus("takeover", None, None)
             return True

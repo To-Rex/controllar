@@ -4,6 +4,23 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.3] — 2026-10-20
+
+### Fixed
+
+- Boshqaruvchi Mac’da kursor Windows’ga o‘tganda lokal kursor endi
+  harakatlanmaydi: macOS event tap move eventlarini to‘xtatadi, CGEvent
+  deltalari esa Windows’ga uzatiladi. Kursor markazda qotiriladi.
+- Forwarding va passive holatda kursor yashiriladi; sessiya boshlanishida uni
+  qayta ko‘rsatib yuborgan start-tartibi tuzatildi.
+- macOS’da kursor yana ko‘rinib qolsa, `CGCursorIsDrawnInFramebuffer` orqali
+  davriy qayta yashirish va hide-count balansi qo‘shildi.
+- Fokusni faqat sichqoncha harakati bilan emas, **klaviatura tugmasi, sichqoncha
+  bosishi yoki `Ctrl+Alt+Space`** bilan olish mumkin. Bu remote injected
+  harakatlar yoki tasodifiy siljishlar sabab fokus “sakrashini” yo‘qotadi.
+- Faqat faol kompyuter kursori ko‘rinadi; ikkinchi kompyuter kursori yashirin
+  va harakatsiz bo‘ladi.
+
 ## [1.0.2] — 2026-10-20
 
 ### Fixed

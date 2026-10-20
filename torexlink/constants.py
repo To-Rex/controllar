@@ -7,7 +7,7 @@ Never change them without a protocol/format migration.
 from __future__ import annotations
 
 APP_NAME = "ToRexLink"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 APP_BUNDLE_ID = "uz.torexlink.app"
 PROTOCOL_VERSION = 1
 
@@ -42,7 +42,6 @@ HOTKEY_LABEL = "Ctrl+Alt+Space"
 HOTKEY_KEYS = frozenset({"ctrl", "alt", "space"})
 EDGES = ("left", "right", "top", "bottom")
 OPPOSITE_EDGE = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
-TAKEOVER_MOVE_THRESHOLD_PX = 24.0
 INPUT_MOVE_SEND_INTERVAL = 0.004
 INPUT_QUEUE_MAX = 2048
 SCREEN_EDGE_MARGIN_PX = 2

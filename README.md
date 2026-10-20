@@ -26,7 +26,8 @@ avtomatik topadi.
   faylidan skanerlanadi.
 - **Token orqali avtomatik qayta ulanish** — juftlik bir marta tasdiqlanadi;
   keyingi ulanishlar 256-bitli token va pinned sertifikat orqali bo‘ladi.
-- **Kursor fokusi** — kursor ekran chetidan o‘tadi yoki `Ctrl+Alt+Space`
+- **Kursor fokusi** — kursor ekran chetidan o‘tadi yoki `Ctrl+Alt+Space`;
+  faol bo‘lmagan kompyuterda kursor yashiriladi va qotiriladi
   bilan kompyuterlar almashadi. Ikkala kompyuterning ham klaviaturasi va
   sichqonchasi boshqaruvni o‘z zimmasiga olishi mumkin.
 - **TLS 1.3** — faqat TLS 1.3, SHA-256 sertifikat fingerprinti pinlanadi,

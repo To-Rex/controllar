@@ -59,7 +59,10 @@ autentifikatsiya qilinadi.
   boring. Masalan, ikkinchi kompyuter o‘ng tomonda bo‘lsa, “O‘ng”ni tanlang.
 - **Klaviatura bilan:** `Ctrl+Alt+Space`.
 - **Qaytish:** kursor kirgan chetga qaytib o‘ting, `Ctrl+Alt+Space` bosing
-  yoki ikkinchi kompyuterning fizik sichqonchasi/klaviaturasini qo‘zg‘ating.
+  yoki ikkinchi kompyuterda sichqoncha tugmasini bosing / klaviatura tugmasini
+  bosing.
+- Boshqa kompyuterda ishlayotganda bu kompyuterning kursori yashiriladi va
+  qotiriladi; ekranda faqat faol kompyuter kursori harakatlanadi.
 - Qaytganingizdan so‘ng tasodifiy “sakrash” bo‘lmasligi uchun kursor chetdan
   kamida 56 px ichkariga surilishi kerak — shundan keyin keyingi o‘tish
   faollashadi.

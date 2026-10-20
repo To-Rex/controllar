@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from typing import Any
 
 from .base import InputBackendError, InputPermissions
@@ -679,12 +680,37 @@ class MacOSInputBackend:
         if visible == (not self._cursor_hidden):
             return
         with self._lock:
+            display = Quartz.CGMainDisplayID()
             if visible:
-                Quartz.CGDisplayShowCursor(Quartz.CGMainDisplayID())
+                # CGDisplayHideCursor increments a global hide count. Balance
+                # every hide, including defensive re-hides.
+                for _ in range(max(1, self._cursor_hide_depth)):
+                    Quartz.CGDisplayShowCursor(display)
+                self._cursor_hide_depth = 0
                 self._cursor_hidden = False
             else:
-                Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
+                error = Quartz.CGDisplayHideCursor(display)
+                if error:
+                    log.warning("CGDisplayHideCursor failed with CGError %s", error)
+                self._cursor_hide_depth = max(1, self._cursor_hide_depth + 1)
                 self._cursor_hidden = True
+
+    def ensure_cursor_hidden(self) -> None:
+        """Re-hide if macOS or another app made the cursor visible again."""
+        if not self._cursor_hidden:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_cursor_check < 0.25:
+                return
+            self._last_cursor_check = now
+            with contextlib.suppress(Exception):
+                if Quartz.CGCursorIsDrawnInFramebuffer():
+                    error = Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
+                    if error:
+                        log.debug("CGDisplayHideCursor re-hide failed: %s", error)
+                    else:
+                        self._cursor_hide_depth += 1
 
     # ------------------------------------------------------------------- stubs
     @staticmethod

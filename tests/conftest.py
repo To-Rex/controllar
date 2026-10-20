@@ -14,6 +14,7 @@ from torexlink.settings import SettingsStore
 
 class FakeInputBackend:
     name = "Test input"
+    suppress_moves_when_forwarding = True
 
     def __init__(self) -> None:
         self.callback: Callable[[InputEvent, bool], bool] | None = None

@@ -128,6 +128,8 @@ async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) ->
         assert guest.snapshot().focus.local_controller
         assert guest.snapshot().focus.local_target
         assert not host.snapshot().focus.local_controller
+        # Idle peer cursor is hidden, not left visible as a second cursor.
+        await wait_for(lambda: host_backend.cursor_visible is False)
 
         guest_backend.emit(InputKeyEvent(key="space", pressed=True, mods=("ctrl", "alt")))
         await wait_for(
@@ -137,15 +139,35 @@ async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) ->
         assert guest.snapshot().focus.controller_id == guest_id
         await wait_for(lambda: host_backend.cursor_visible)
         assert host_backend.cursor == (960, 540)
+        # The controller (guest) hides and freezes its own pointer; only the
+        # target computer's cursor may visibly move.
+        await wait_for(lambda: guest_backend.cursor_visible is False)
 
-        guest_backend.emit(InputMoveEvent(dx=0.01, dy=0.0, x=500, y=500))
+        move_suppressed = guest_backend.emit(
+            InputMoveEvent(dx=0.01, dy=0.0, x=500, y=500)
+        )
+        assert move_suppressed is True  # sender freezes its local pointer
         await wait_for(lambda: len(host_backend.injected) > 0)
         assert any(isinstance(item, InputMoveEvent) for item in host_backend.injected)
 
+        # Moving the target's physical mouse must not steal focus (injected
+        # remote motion must never be mistaken for a takeover either).
+        suppressed_move = host_backend.emit(
+            InputMoveEvent(dx=0.2, dy=0.1, x=800, y=600)
+        )
+        assert suppressed_move is True
+        await asyncio.sleep(0.45)
+        assert host.snapshot().focus.local_target is True
+        assert guest.snapshot().focus.local_controller is True
+
+        # A deliberate click/key is the takeover gesture.
         suppressed = host_backend.emit(InputKeyEvent(key="a", pressed=True, mods=()))
         assert suppressed is True
         await wait_for(lambda: host.snapshot().focus.local_target is True)
         await wait_for(lambda: guest.snapshot().focus.local_controller is False)
+        # The now-idle guest hides its pointer as well; only the active
+        # computer should show a cursor.
+        await wait_for(lambda: guest_backend.cursor_visible is False)
     finally:
         await guest.stop()
         await host.stop()

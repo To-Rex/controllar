@@ -72,6 +72,14 @@ class FocusAuthority:
 
         if action == "takeover":
             controller, target, reason = requester, requester, "takeover"
+        elif action == "follow":
+            # Follow the visible cursor: when the peer is locally active (it
+            # owns the cursor), a physical key/button on the idle machine turns
+            # that machine into the controller of the peer, without moving the
+            # pointer or stealing the cursor back to the idle machine.
+            if requester == current.controller or current.target != current.controller:
+                raise FocusError("follow is only valid while the peer is locally active")
+            controller, target, reason = requester, peer, "takeover"
         elif action == "return":
             if requester != current.target or requester == current.controller:
                 raise FocusError("focus return is not valid now")

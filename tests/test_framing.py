@@ -62,6 +62,14 @@ def test_reject_invalid_json() -> None:
 def test_input_validation_rejects_unknown_and_oversized_values() -> None:
     base = {"v": 1, "type": "input", "seq": 1, "event": {"t": "move", "dx": 0.1, "dy": -0.1}}
     assert validate_peer_message(base)["event"]["dx"] == 0.1
+    for digit in "0123456789":
+        digit_message = {
+            "v": 1,
+            "type": "input",
+            "seq": 1,
+            "event": {"t": "key", "key": digit, "pressed": True},
+        }
+        assert validate_peer_message(digit_message)["event"]["key"] == digit
     bad_key = {
         "v": 1,
         "type": "input",

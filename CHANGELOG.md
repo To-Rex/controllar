@@ -4,6 +4,26 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.8] — 2026-10-20
+
+### Fixed
+
+- Raqamli key nomlari (`0`–`9`) protokol validatsiyasida “invalid key name”
+  deb rad qilinardi; raqamlar peer’ga yetib bormasdi. Regex tuzatildi.
+- Mac controller kursori endi freeze paytida markazga sakramaydi: chiqish
+  chetida qoladi. Targetga edge bo‘lmagan o‘tishda ham markazga warp
+  qilinmaydi.
+- “Keyboard follows cursor”: peer lokal faol bo‘lganda (kursor peer’da),
+  passiv kompyuterda bosilgan tugma/klaviatura `follow` focus action orqali
+  kursor egaligidagi kompyuterga yuboriladi. Birinchi tugma 32-event buffer’i
+  bilan saqlanadi.
+- `follow` action eski peer’lar uchun avtomatik `takeover`ga fallback
+  qilinadi; bir xil versiya bo‘lmaganda sessiya buzilmaydi.
+
+### Compatibility
+
+- Keyboard-follow va raqamli kalitlar uchun ikkala qurilmada ham **1.0.8**.
+
 ## [1.0.7] — 2026-10-20
 
 ### Fixed

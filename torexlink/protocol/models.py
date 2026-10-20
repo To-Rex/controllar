@@ -17,7 +17,7 @@ from ..util import clamp
 
 _ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _LOG_REQUEST_RE = re.compile(r"^[0-9a-f]{16}$")
-_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_KEY_RE = re.compile(r"^(?:[0-9]|[a-z][a-z0-9_]{0,31})$")
 _BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 _MODS = frozenset({"ctrl", "alt", "shift", "meta", "caps"})
 _EVENT_TYPES = frozenset({"key", "move", "button", "wheel"})

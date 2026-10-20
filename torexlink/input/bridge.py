@@ -79,6 +79,8 @@ class InputBridge:
         self._last_hotkey = 0.0
         self._last_injected_check = 0.0
         self._virtual_pointer: tuple[float, float] = (0.0, 0.0)
+        self._pending_forward: list[InputEvent] = []
+        self._pending_forward_at = 0.0
 
     # ------------------------------------------------------------------ state
     def apply_focus(
@@ -135,10 +137,13 @@ class InputBridge:
             is_local_active = controller == self.self_id and target == self.self_id
             if is_forwarding:
                 if not was_forwarding:
+                    # Park at the exact exit position instead of the centre:
+                    # if the OS briefly shows the hidden pointer, it remains at
+                    # the edge where the user crossed instead of jumping to the
+                    # middle of the screen.
                     self._saved_pointer = self.backend.pointer_position()
                     self.backend.release_local_modifiers()
-                    width, height = self.backend.screen_size()
-                    self.backend.warp_pointer(width // 2, height // 2)
+                    self.backend.warp_pointer(*self._saved_pointer)
                 self._set_pointer_frozen(True)
                 self._set_cursor_visible(False)
             elif is_receiving:
@@ -146,9 +151,8 @@ class InputBridge:
                 self._set_cursor_visible(True)
                 if entry_edge is not None:
                     self._warp_to_entry(entry_edge, position if position is not None else 0.5)
-                elif not (previous[0] == self.peer_id and previous[1] == self.self_id):
-                    width, height = self.backend.screen_size()
-                    self.backend.warp_pointer(width // 2, height // 2)
+                # On a non-edge transition (keyboard follow/takeover) keep the
+                # target pointer where the user is already working.
                 self._virtual_pointer = (
                     float(self.backend.pointer_position()[0]),
                     float(self.backend.pointer_position()[1]),
@@ -174,6 +178,17 @@ class InputBridge:
                     self.backend.release_injected_keys()
             if not is_forwarding and was_forwarding:
                 self.backend.release_local_modifiers()
+            pending: list[InputEvent] = []
+            with self._lock:
+                if is_forwarding and self._pending_forward:
+                    pending = self._pending_forward
+                    self._pending_forward = []
+                    self._pending_forward_at = 0.0
+                elif not is_forwarding:
+                    self._pending_forward = []
+                    self._pending_forward_at = 0.0
+            for queued in pending:
+                self._send(queued)
             log.info(
                 "Focus epoch=%s controller=%s target=%s reason=%s",
                 epoch,
@@ -241,6 +256,9 @@ class InputBridge:
                 with contextlib.suppress(Exception):
                     self.backend.set_pointer_frozen(False)
                 self._set_cursor_visible(True)
+                with self._lock:
+                    self._pending_forward.clear()
+                    self._pending_forward_at = 0.0
         log.info("Native input backend stopped")
 
     # ---------------------------------------------------------------- capture
@@ -326,8 +344,24 @@ class InputBridge:
                 # allowed to move; macOS stays fully frozen.
                 return bool(getattr(self.backend, "suppress_moves_when_passive", True))
             if isinstance(event, (InputKeyEvent, InputButtonEvent)):
-                if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
-                    self._request_focus("takeover", None, None)
+                if receiving:
+                    # Cursor is on this machine; the first key may switch
+                    # ownership locally.
+                    if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
+                        self._request_focus("takeover", None, None)
+                else:
+                    # Cursor is on the peer. Typing/clicking on this machine
+                    # must send input to the computer that owns the cursor,
+                    # not steal the cursor back here.
+                    with self._lock:
+                        if now - self._pending_forward_at > 2.0:
+                            self._pending_forward.clear()
+                        if not self._pending_forward:
+                            self._pending_forward_at = now
+                        if len(self._pending_forward) < 32:
+                            self._pending_forward.append(event)
+                    if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
+                        self._request_focus("follow", None, None)
             return True
         return False
 

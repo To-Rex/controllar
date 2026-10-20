@@ -138,7 +138,8 @@ async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) ->
         )
         assert guest.snapshot().focus.controller_id == guest_id
         await wait_for(lambda: host_backend.cursor_visible)
-        assert host_backend.cursor == (960, 540)
+        # Non-edge focus changes keep the target pointer where it was.
+        assert host_backend.cursor == (100, 100)
         # The controller (guest) hides and freezes its own pointer; only the
         # target computer's cursor may visibly move.
         await wait_for(lambda: guest_backend.cursor_visible is False)
@@ -198,6 +199,9 @@ async def test_edge_switch_places_remote_cursor_on_opposite_edge(service_factory
         host_focus = host.snapshot().focus
         assert host_focus.entry_edge == "left"
         await wait_for(lambda: host_backend.cursor[0] <= 3)
+        # The controller cursor must not snap to the centre; it stays parked
+        # at the edge where the user crossed.
+        assert guest_backend.cursor == (1919, 500)
     finally:
         await guest.stop()
         await host.stop()
@@ -394,6 +398,61 @@ async def test_remote_logs_are_exchanged_and_saved(service_factory) -> None:
         remote_guest = await host.request_remote_logs()
         assert "GUEST-REMOTE-LOG-MARKER" in remote_guest.text
         assert "GUEST-REMOTE-LOG-MARKER" in remote_guest.saved_path.read_text(encoding="utf-8")
+    finally:
+        await guest.stop()
+        await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_passive_keyboard_follows_active_cursor(service_factory) -> None:
+    """Typing on the idle computer must go to the cursor's computer."""
+    from torexlink.input.events import InputKeyEvent
+
+    host, host_backend, _ = service_factory(name="follow-host", hosting=True)
+    guest, guest_backend, _ = service_factory(name="follow-guest", hosting=False)
+    try:
+        await host.start()
+        await guest.start()
+        pairing = await host.begin_pairing()
+        await guest.pair_with_payload(PairingPayload.parse(pairing.qr_uri))
+        await wait_for(lambda: guest.snapshot().connection is not None)
+        await wait_for(lambda: host.snapshot().connection is not None)
+        await wait_for(lambda: guest_backend.started and host_backend.started, timeout=6)
+        host_id = host.identity.device_id
+        guest_id = guest.identity.device_id
+
+        # Let the host take local focus so the guest is passive while the
+        # cursor is visually on the host.
+        # A deliberate hotkey takeover is used to make the host the local
+        # owner; a plain key now follows the cursor instead.
+        host_backend.emit(InputKeyEvent(key="space", pressed=True, mods=("ctrl", "alt")))
+        await wait_for(
+            lambda: host.snapshot().focus is not None
+            and host.snapshot().focus.local_target
+            and host.snapshot().focus.local_controller
+        )
+        await wait_for(
+            lambda: guest.snapshot().focus is not None
+            and not guest.snapshot().focus.local_controller
+            and guest.snapshot().focus.target_id == host_id
+        )
+
+        before = len(host_backend.injected)
+        guest_backend.emit(InputKeyEvent(key="7", pressed=True, mods=()))
+        await wait_for(
+            lambda: guest.snapshot().focus is not None
+            and guest.snapshot().focus.local_controller
+            and guest.snapshot().focus.target_id == host_id
+        )
+        await wait_for(
+            lambda: any(
+                isinstance(item, InputKeyEvent) and item.key == "7"
+                for item in host_backend.injected[before:]
+            )
+        )
+        assert guest.snapshot().focus.controller_id == guest_id
+        assert host.snapshot().focus is not None
+        assert host.snapshot().focus.local_target is True
     finally:
         await guest.stop()
         await host.stop()

@@ -7,7 +7,7 @@ Never change them without a protocol/format migration.
 from __future__ import annotations
 
 APP_NAME = "ToRexLink"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 APP_BUNDLE_ID = "uz.torexlink.app"
 PROTOCOL_VERSION = 1
 
@@ -52,7 +52,7 @@ REMOTE_RETURN_SETTLE_SECONDS = 0.35
 EVENT_COOLDOWN_SECONDS = 0.35
 
 # Focus arbitration
-FOCUS_ACTIONS = frozenset({"toggle", "edge", "takeover", "return"})
+FOCUS_ACTIONS = frozenset({"toggle", "edge", "takeover", "return", "follow"})
 FOCUS_REASONS = frozenset({"hotkey", "edge", "takeover", "remote-return", "initial"})
 
 # UI
@@ -83,6 +83,7 @@ LOG_SHARE_MAX_BYTES = 256 * 1024
 LOG_SHARE_TIMEOUT_SECONDS = 10.0
 LOG_SHARE_COOLDOWN_SECONDS = 2.0
 REMOTE_LOGS_MIN_VERSION = "1.0.5"
+KEYBOARD_FOLLOW_MIN_VERSION = "1.0.8"
 APP_EXIT_TIMEOUT = 6.0
 
 # Limit untrusted network requests

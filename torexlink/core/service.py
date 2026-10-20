@@ -25,6 +25,7 @@ from ..constants import (
     APP_VERSION,
     DEFAULT_PORT,
     FOCUS_ACTIONS,
+    KEYBOARD_FOLLOW_MIN_VERSION,
     LOG_SHARE_COOLDOWN_SECONDS,
     LOG_SHARE_MAX_BYTES,
     LOG_SHARE_TIMEOUT_SECONDS,
@@ -1093,9 +1094,18 @@ class ToRexLinkService:
         edge: str | None,
         position: float | None,
     ) -> None:
-        if self._active is None or action not in FOCUS_ACTIONS:
+        active = self._active
+        if active is None:
             return
-        if self._active.role == "host":
+        if action == "follow" and not version_at_least(
+            active.app_version, KEYBOARD_FOLLOW_MIN_VERSION
+        ):
+            # Old peers do not understand follow; keep the established local
+            # takeover behaviour instead of publishing an incompatible state.
+            action = "takeover"
+        if action not in FOCUS_ACTIONS:
+            return
+        if active.role == "host":
             assert self._focus_authority is not None
             try:
                 state = self._focus_authority.apply(

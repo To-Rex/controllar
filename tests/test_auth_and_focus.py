@@ -86,3 +86,14 @@ def test_focus_authority_transitions() -> None:
         authority.apply("x" * 64, "toggle")
     with pytest.raises(FocusError):
         authority.apply(guest, "return")
+
+
+def test_focus_follow_keeps_peer_as_target() -> None:
+    from torexlink.core.focus import FocusAuthority
+
+    authority = FocusAuthority("h" * 64, "c" * 64)
+    state = authority.apply("c" * 64, "takeover")
+    assert (state.controller, state.target) == ("c" * 64, "c" * 64)
+    followed = authority.apply("h" * 64, "follow")
+    assert (followed.controller, followed.target) == ("h" * 64, "c" * 64)
+    assert followed.reason == "takeover"

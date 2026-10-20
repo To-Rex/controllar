@@ -682,11 +682,9 @@ class MacOSInputBackend:
         with self._lock:
             self._pointer_frozen = frozen
             if frozen:
-                width, height = self.screen_size()
-                self._frozen_center = (width // 2, height // 2)
-                Quartz.CGWarpMouseCursorPosition(
-                    Quartz.CGPointMake(self._frozen_center[0], self._frozen_center[1])
-                )
+                # The bridge has already parked the local pointer at the exit
+                # position. Freeze it exactly there; never snap it to centre.
+                self._frozen_center = self.pointer_position()
                 self._last_physical_pointer = (
                     float(self._frozen_center[0]),
                     float(self._frozen_center[1]),

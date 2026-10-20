@@ -58,9 +58,9 @@ autentifikatsiya qilinadi.
 - **Sichqoncha bilan:** kursorni sozlamalarda tanlangan ekran chetiga olib
   boring. Masalan, ikkinchi kompyuter o‘ng tomonda bo‘lsa, “O‘ng”ni tanlang.
 - **Klaviatura bilan:** `Ctrl+Alt+Space`.
-- **Qaytish:** kursor kirgan chetga qaytib o‘ting, `Ctrl+Alt+Space` bosing
-  yoki ikkinchi kompyuterda sichqoncha tugmasini bosing / klaviatura tugmasini
-  bosing.
+- **Qaytish:** kursor kirgan chetga qaytib o‘ting yoki `Ctrl+Alt+Space`
+  bosing. Passiv kompyuterda klaviatura/sichqoncha bosilsa, input kursor
+  turgan kompyuterga yuboriladi (keyboard follows cursor).
 - Boshqa kompyuterda ishlayotganda bu kompyuterning kursori yashiriladi va
   har bir harakatdan keyin markazga qaytariladi; ekranda faqat faol kompyuter
   kursori harakatlanadi.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "torexlink"
-version = "1.0.1"
+version = "1.0.2"
 description = "ToRexLink — xavfsiz, ikki kompyuter uchun klaviatura va sichqoncha almashinuvi"
 readme = "README.md"
 requires-python = ">=3.11"

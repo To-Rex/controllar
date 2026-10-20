@@ -62,7 +62,9 @@ autentifikatsiya qilinadi.
   yoki ikkinchi kompyuterning fizik sichqonchasi/klaviaturasini qo‘zg‘ating.
 - Qaytganingizdan so‘ng tasodifiy “sakrash” bo‘lmasligi uchun kursor chetdan
   kamida 56 px ichkariga surilishi kerak — shundan keyin keyingi o‘tish
-  faollashadi. Target kompyuterda ham xuddi shu 40 px himoya ishlaydi.
+  faollashadi.
+- Boshqa kompyuterdan qaytish uchun kursor chetga yetib kelgach, yana kamida
+  36 px tashqariga suring. Oddiy tegib o‘tish yoki mayda tebranish qaytarmaydi.
 
 Ekranning yuqori qismidagi banner va tray tooltip qaysi kompyuter boshqaruvda
 ekanligini ko‘rsatadi.

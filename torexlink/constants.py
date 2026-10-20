@@ -7,7 +7,7 @@ Never change them without a protocol/format migration.
 from __future__ import annotations
 
 APP_NAME = "ToRexLink"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 APP_BUNDLE_ID = "uz.torexlink.app"
 PROTOCOL_VERSION = 1
 
@@ -48,6 +48,8 @@ INPUT_QUEUE_MAX = 2048
 SCREEN_EDGE_MARGIN_PX = 2
 EDGE_REARM_MARGIN_PX = 56
 REMOTE_RETURN_REARM_MARGIN_PX = 40
+REMOTE_RETURN_PUSH_PX = 36.0
+REMOTE_RETURN_SETTLE_SECONDS = 0.35
 EVENT_COOLDOWN_SECONDS = 0.35
 
 # Focus arbitration

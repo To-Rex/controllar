@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..constants import (
+    APP_VERSION,
     DEFAULT_PORT,
     FOCUS_ACTIONS,
     RECONNECT_DELAYS,
@@ -822,6 +823,14 @@ class ToRexLinkService:
         self._cancel_pairing_expiry()
         self._pairing_manager.cancel()
         session.start()
+        if link.peer_app_version and link.peer_app_version != APP_VERSION:
+            log.warning(
+                "Peer %s runs ToRexLink %s but this device runs %s; "
+                "update both computers for consistent focus handoff",
+                record.name,
+                link.peer_app_version,
+                APP_VERSION,
+            )
         await session.send_focus_state(self._focus_dict(self._focus))
         await self._start_session_components(initial_focus=self._focus)
         self._notify("connected", data={"peer_name": record.name})
@@ -881,6 +890,14 @@ class ToRexLinkService:
         self._cancel_pairing_expiry()
         self._pairing_manager.cancel()
         session.start()
+        if link.peer_app_version and link.peer_app_version != APP_VERSION:
+            log.warning(
+                "Peer %s runs ToRexLink %s but this device runs %s; "
+                "update both computers for consistent focus handoff",
+                record.name,
+                link.peer_app_version,
+                APP_VERSION,
+            )
         await self._start_clipboard()
         self._notify("connected", data={"peer_name": record.name})
         log.info("Guest session established with %s", record.name)
@@ -1006,6 +1023,8 @@ class ToRexLinkService:
         position = message.get("position")
         if action not in FOCUS_ACTIONS:
             return
+        if action in {"edge", "return"}:
+            log.info("Peer focus request: action=%s edge=%s", action, edge)
         try:
             state = self._focus_authority.apply(
                 active.peer.peer_id,

@@ -14,7 +14,9 @@ from ..constants import (
     EDGE_REARM_MARGIN_PX,
     EVENT_COOLDOWN_SECONDS,
     HOTKEY_LABEL,
+    REMOTE_RETURN_PUSH_PX,
     REMOTE_RETURN_REARM_MARGIN_PX,
+    REMOTE_RETURN_SETTLE_SECONDS,
     SCREEN_EDGE_MARGIN_PX,
     TAKEOVER_MOVE_THRESHOLD_PX,
 )
@@ -73,6 +75,7 @@ class InputBridge:
         self._edge_latched = False
         self._edge_armed = False
         self._remote_return_armed = False
+        self._remote_return_push = 0.0
         self._receiving_since = 0.0
         self._injected_return_latched = False
         self._last_focus_request = 0.0
@@ -122,6 +125,7 @@ class InputBridge:
             self._injected_return_latched = False
             self._edge_armed = False
             self._remote_return_armed = False
+            self._remote_return_push = 0.0
             if controller == self.self_id and target == self.self_id:
                 # After an edge/remote return, require the user to move the
                 # pointer away from the exit edge before it can trigger again.
@@ -398,8 +402,9 @@ class InputBridge:
                 width, height = self.backend.screen_size()
                 if width <= 0 or height <= 0:
                     return
-                nx = self._virtual_pointer[0] + event.dx * width
-                ny = self._virtual_pointer[1] + event.dy * height
+                previous_x, previous_y = self._virtual_pointer
+                nx = previous_x + event.dx * width
+                ny = previous_y + event.dy * height
                 nx = min(width - 1, max(0.0, nx))
                 ny = min(height - 1, max(0.0, ny))
                 ratio_x = nx / max(1, width - 1)
@@ -407,45 +412,65 @@ class InputBridge:
                 self._virtual_pointer = (nx, ny)
                 should_return = False
                 at_edge = False
+                was_at_edge = False
                 distance = 0
+                outward_travel = 0.0
                 if entry_edge is not None:
                     margin = SCREEN_EDGE_MARGIN_PX
                     if entry_edge == "left":
                         at_edge = nx <= margin
+                        was_at_edge = previous_x <= margin
                         distance = nx
                         should_return = at_edge and event.dx < 0
+                        outward_travel = abs(event.dx) * width
                     elif entry_edge == "right":
                         at_edge = nx >= width - margin - 1
+                        was_at_edge = previous_x >= width - margin - 1
                         distance = width - 1 - nx
                         should_return = at_edge and event.dx > 0
+                        outward_travel = abs(event.dx) * width
                     elif entry_edge == "top":
                         at_edge = ny <= margin
+                        was_at_edge = previous_y <= margin
                         distance = ny
                         should_return = at_edge and event.dy < 0
+                        outward_travel = abs(event.dy) * height
                     elif entry_edge == "bottom":
                         at_edge = ny >= height - margin - 1
+                        was_at_edge = previous_y >= height - margin - 1
                         distance = height - 1 - ny
                         should_return = at_edge and event.dy > 0
+                        outward_travel = abs(event.dy) * height
                 if entry_edge is not None and not at_edge:
                     self._injected_return_latched = False
+                    self._remote_return_push = 0.0
                     if distance >= REMOTE_RETURN_REARM_MARGIN_PX:
                         self._remote_return_armed = True
                 if at_edge:
-                    if (
-                        not self._injected_return_latched
-                        and should_return
-                        and self._remote_return_armed
-                        and time.monotonic() - self._receiving_since >= 0.15
-                    ):
-                        self._injected_return_latched = True
-                        self._remote_return_armed = False
-                        self._last_focus_request = time.monotonic()
-                        log.info("Remote cursor left the target edge; returning focus")
-                        try:
-                            self.callbacks.request_focus("return", None, None)
-                        except Exception:  # noqa: BLE001
-                            log.debug("Return focus callback failed", exc_info=True)
-                        return
+                    # A single event that merely reaches the edge must not
+                    # return focus. The user has to keep pushing outward for
+                    # at least REMOTE_RETURN_PUSH_PX after arriving there.
+                    if not was_at_edge or not should_return or not self._remote_return_armed:
+                        self._remote_return_push = 0.0
+                    elif time.monotonic() - self._receiving_since >= REMOTE_RETURN_SETTLE_SECONDS:
+                        self._remote_return_push += outward_travel
+                        if (
+                            self._remote_return_push >= REMOTE_RETURN_PUSH_PX
+                            and not self._injected_return_latched
+                        ):
+                            self._injected_return_latched = True
+                            self._remote_return_armed = False
+                            self._remote_return_push = 0.0
+                            self._last_focus_request = time.monotonic()
+                            log.info(
+                                "Remote cursor pushed through target edge (%.1f px); returning focus",
+                                REMOTE_RETURN_PUSH_PX,
+                            )
+                            try:
+                                self.callbacks.request_focus("return", None, None)
+                            except Exception:  # noqa: BLE001
+                                log.debug("Return focus callback failed", exc_info=True)
+                            return
                 del ratio_x, ratio_y, epoch
         try:
             self.backend.inject(event)

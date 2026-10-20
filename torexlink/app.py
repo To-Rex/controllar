@@ -49,9 +49,24 @@ def _self_test() -> int:
         "python": platform.python_version(),
         "modules": {},
     }
-    modules = ["PySide6", "cryptography", "zeroconf", "zeroconf.asyncio", "qrcode", "zxingcpp", "PIL"]
+    modules = [
+        "PySide6",
+        "PySide6.QtCore",
+        "PySide6.QtGui",
+        "PySide6.QtWidgets",
+        "PySide6.QtNetwork",
+        "PySide6.QtMultimedia",
+        "cryptography",
+        "zeroconf",
+        "zeroconf.asyncio",
+        "qrcode",
+        "zxingcpp",
+        "PIL",
+    ]
     if sys.platform == "darwin":
         modules += ["objc", "Quartz", "AppKit", "ApplicationServices"]
+    if sys.platform == "win32":
+        modules += ["ctypes", "winreg", "torexlink.input.windows", "torexlink.platform.firewall"]
     failed = False
     module_results = results["modules"]
     assert isinstance(module_results, dict)
@@ -78,6 +93,17 @@ def _self_test() -> int:
             failed = failed or not all(checks.values())
         except Exception as exc:  # noqa: BLE001
             results["macos_native"] = f"error: {exc}"
+            failed = True
+    if sys.platform == "win32":
+        try:
+            from .input.windows import WindowsInputBackend
+
+            results["windows_native"] = {
+                "backend_supported": WindowsInputBackend.is_supported(),
+            }
+            failed = failed or not WindowsInputBackend.is_supported()
+        except Exception as exc:  # noqa: BLE001
+            results["windows_native"] = f"error: {exc}"
             failed = True
     results["ok"] = not failed
     print(json.dumps(results, indent=2, sort_keys=True))

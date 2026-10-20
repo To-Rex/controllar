@@ -4,6 +4,21 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.2] — 2026-10-20
+
+### Fixed
+
+- Target-edge return endi ataylab 36 px tashqariga bosishni talab qiladi.
+  Chekka bir marta tegib o‘tish yoki kursorning kichik tebranishi Mac’ga
+  qaytarib yubormaydi.
+- Return settle oynasi 150 ms → 350 ms; kursor chetga yetib kelgan eventning
+  o‘zi return qilmaydi, faqat chekka yetib kelgandan keyingi davomiy harakat
+  hisobga olinadi.
+- Peer ilova versiyasi lokal versiyadan farq qilsa, logda ogohlantirish
+  yoziladi — ikki qurilma turli versiyada qolib ketishi handoff’ni
+  buzmasligi uchun.
+- Windows uchun GitHub Actions orqali portable build workflow’i qo‘shildi.
+
 ## [1.0.1] — 2026-10-20
 
 ### Fixed

@@ -302,10 +302,20 @@ async def test_edge_return_disarms_until_pointer_moves_inward(service_factory) -
         #    through the same edge and returns focus to the guest.
         guest_backend.emit(InputMoveEvent(dx=0.05, dy=0.0, x=900, y=540))
         await wait_for(lambda: host_backend.cursor[0] >= 40, timeout=3)
-        # The target deliberately ignores edge returns during the first 150 ms
-        # after entry, so let that grace window expire before testing return.
-        await asyncio.sleep(0.2)
+        # The target deliberately ignores edge returns during the first
+        # settle window, so let it expire before testing return.
+        await asyncio.sleep(0.4)
+        # Reaching the edge is not enough: this event is injected but must not
+        # hand focus back by itself.
         guest_backend.emit(InputMoveEvent(dx=-0.12, dy=0.0, x=900, y=540))
+        await wait_for(lambda: host_backend.cursor[0] <= 3, timeout=3)
+        await asyncio.sleep(0.1)
+        guest_focus = guest.snapshot().focus
+        assert guest_focus is not None
+        assert guest_focus.local_controller is True
+        assert guest_focus.local_target is False
+        # A deliberate additional outward push (57.6 px) returns to the Mac.
+        guest_backend.emit(InputMoveEvent(dx=-0.03, dy=0.0, x=900, y=540))
         await wait_for(
             lambda: guest.snapshot().focus is not None
             and guest.snapshot().focus.local_target

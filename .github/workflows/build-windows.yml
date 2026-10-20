@@ -1,0 +1,48 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pyinstaller>=6.10"
+      - name: Build portable app
+        shell: pwsh
+        run: |
+          $version = python -c "from torexlink.constants import APP_VERSION; print(APP_VERSION)"
+          python -m PyInstaller packaging/ToRexLink.spec --noconfirm --clean
+          $exe = "dist\ToRexLink\ToRexLink.exe"
+          $test = Start-Process -FilePath $exe -ArgumentList "--self-test" -NoNewWindow -Wait -PassThru
+          if ($test.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($test.ExitCode)" }
+          Compress-Archive -Path "dist\ToRexLink" -DestinationPath "dist\ToRexLink-$version-windows-x64.zip" -Force
+          Get-FileHash "dist\ToRexLink-$version-windows-x64.zip" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  ToRexLink-$version-windows-x64.zip" } |
+            Set-Content "dist\SHA256SUMS-windows.txt"
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ToRexLink-Windows-x64
+          path: |
+            dist/ToRexLink-*-windows-x64.zip
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 14

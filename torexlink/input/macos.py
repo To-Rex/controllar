@@ -748,6 +748,21 @@ class MacOSInputBackend:
                 self._cursor_hide_depth = max(1, self._cursor_hide_depth + 1)
                 self._cursor_hidden = True
 
+    def force_cursor_hidden(self) -> None:
+        """Hide even when the tracked state says the cursor is already hidden.
+
+        CGWarpMouseCursorPosition (used when entering forwarding) can make
+        macOS draw the cursor again without changing our hide count. Re-hiding
+        immediately after the warp keeps the controller visibly cursor-free.
+        """
+        with self._lock:
+            error = Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
+            if error:
+                log.warning("CGDisplayHideCursor failed with CGError %s", error)
+                return
+            self._cursor_hide_depth = max(1, self._cursor_hide_depth + 1)
+            self._cursor_hidden = True
+
     def ensure_cursor_hidden(self) -> None:
         """Re-hide if macOS or another app made the cursor visible again."""
         if not self._cursor_hidden:

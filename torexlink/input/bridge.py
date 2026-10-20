@@ -144,6 +144,14 @@ class InputBridge:
                     self._saved_pointer = self.backend.pointer_position()
                     self.backend.release_local_modifiers()
                     self.backend.warp_pointer(*self._saved_pointer)
+                    # Warping can make macOS draw the cursor again. Force a
+                    # hide after the warp even if our state already said it was
+                    # hidden, otherwise a stationary duplicate stays visible at
+                    # the edge while the peer cursor moves.
+                    force_hidden = getattr(self.backend, "force_cursor_hidden", None)
+                    if force_hidden is not None:
+                        with contextlib.suppress(Exception):
+                            force_hidden()
                 self._set_pointer_frozen(True)
                 self._set_cursor_visible(False)
             elif is_receiving:

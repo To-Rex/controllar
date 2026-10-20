@@ -4,6 +4,24 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.9] — 2026-10-21
+
+### Fixed
+
+- Controller Mac’da kursor warp’dan keyin qayta ko‘rinib qolishi mumkin edi;
+  endi forwarding’ga kirishda warp’dan so‘ng **majburiy hide** qilinadi.
+  Natijada birinchi kompyuterda statsionar ikkinchi kursor qolmaydi.
+- Windows target’da edge-return juda oson trigger bo‘lib, focusni qaytarib
+  yuborardi. Settle **0.6 s**, push **72 px**, rearm **60 px** qilindi —
+  tasodifiy harakat endi qaytarmaydi, ataylab chetga bosish ishlaydi.
+- Controller kursorining mantiqiy pozitsiyasi chiqish chetida saqlanadi;
+  qaytishda o‘sha joydan davom etadi.
+
+### Compatibility
+
+- 1.0.9 ikkala qurilmada ham tavsiya etiladi; keyboard-follow va raqamli
+  tugmalar uchun 1.0.8+ majburiy.
+
 ## [1.0.8] — 2026-10-20
 
 ### Fixed

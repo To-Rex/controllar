@@ -15,6 +15,7 @@ import contextlib
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -103,6 +104,10 @@ class MacOSInputBackend:
         self._last_cursor_check = 0.0
         self._pointer_frozen = False
         self._frozen_center: tuple[int, int] = (0, 0)
+        self._associated = True
+        self._watchdog: subprocess.Popen[bytes] | None = None
+        self._watchdog_lock = threading.Lock()
+        self._watchdog_warned = False
         self._screen_size_cache: tuple[int, int] = (0, 0)
         self._screen_size_at = 0.0
         self._scroll_accum_x = 0.0
@@ -173,6 +178,12 @@ class MacOSInputBackend:
     def start(self, callback: Any) -> None:
         if self._started:
             return
+        # Recover from a previous hard crash that left the system mouse
+        # disassociated. The watchdog normally handles this, but this makes
+        # every startup self-healing.
+        with contextlib.suppress(Exception):
+            Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+        self._associated = True
         self._screen_size_at = 0.0
         permissions = self.preflight()
         if not permissions.capture:
@@ -665,36 +676,107 @@ class MacOSInputBackend:
         width, height = self.screen_size()
         x = max(0, min(width - 1, int(x)))
         y = max(0, min(height - 1, int(y)))
-        Quartz.CGAssociateMouseAndMouseCursorPosition(True)
-        self._pointer_frozen = False
         Quartz.CGWarpMouseCursorPosition(Quartz.CGPointMake(x, y))
         self._last_physical_pointer = (float(x), float(y))
 
-    def set_pointer_frozen(self, frozen: bool) -> None:
-        """Mark the local pointer as frozen and park it in the centre.
+    def _watchdog_alive(self) -> bool:
+        with self._watchdog_lock:
+            return self._watchdog is not None and self._watchdog.poll() is None
 
-        We deliberately do not use CGAssociateMouseAndMouseCursorPosition(False):
-        if the process dies while disassociated, macOS leaves the physical mouse
-        frozen. Instead the event path calls freeze_pointer_motion() for every
-        forwarded movement and warps the local pointer back immediately. Warping
-        generates no mouse events and keeps raw deltas flowing to the peer.
+    def _start_watchdog(self) -> bool:
+        with self._watchdog_lock:
+            if self._watchdog is not None and self._watchdog.poll() is None:
+                return True
+            self._watchdog = None
+            command = [sys.executable]
+            if getattr(sys, "frozen", False):
+                command.append("--cursor-watchdog")
+            else:
+                command.extend(["-m", "torexlink", "--cursor-watchdog"])
+            try:
+                self._watchdog = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    start_new_session=True,
+                )
+            except Exception:  # noqa: BLE001
+                self._watchdog = None
+                if not self._watchdog_warned:
+                    self._watchdog_warned = True
+                    log.warning("Could not start cursor watchdog; using warp fallback")
+                return False
+            return True
+
+    def _stop_watchdog(self) -> None:
+        with self._watchdog_lock:
+            process = self._watchdog
+            self._watchdog = None
+        if process is None:
+            return
+        with contextlib.suppress(Exception):
+            if process.stdin is not None:
+                process.stdin.close()
+        with contextlib.suppress(Exception):
+            process.wait(timeout=0.6)
+        if process.poll() is None:
+            with contextlib.suppress(Exception):
+                process.terminate()
+            with contextlib.suppress(Exception):
+                process.wait(timeout=0.4)
+
+    def _associate(self, associated: bool) -> None:
+        if associated:
+            with contextlib.suppress(Exception):
+                Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+            self._associated = True
+            self._stop_watchdog()
+            return
+        if self._start_watchdog():
+            try:
+                Quartz.CGAssociateMouseAndMouseCursorPosition(False)
+            except Exception:  # noqa: BLE001
+                self._associate(True)
+                return
+            self._associated = False
+
+    def set_pointer_frozen(self, frozen: bool) -> None:
+        """Freeze the local pointer; disassociate physical motion while frozen.
+
+        Cursor warping alone can still paint a moving local cursor for a frame.
+        Disassociation stops local motion completely, so only the peer cursor
+        moves. A stdin-pipe watchdog process watches this process and calls
+        CGAssociateMouseAndMouseCursorPosition(True) if we crash, preventing a
+        system-wide stuck mouse.
         """
         with self._lock:
             self._pointer_frozen = frozen
-            if frozen:
-                # The bridge has already parked the local pointer at the exit
-                # position. Freeze it exactly there; never snap it to centre.
-                self._frozen_center = self.pointer_position()
-                self._last_physical_pointer = (
-                    float(self._frozen_center[0]),
-                    float(self._frozen_center[1]),
-                )
+            if not frozen:
+                if not self._associated:
+                    self._associate(True)
+                return
+            self._frozen_center = self.pointer_position()
+            self._last_physical_pointer = (
+                float(self._frozen_center[0]),
+                float(self._frozen_center[1]),
+            )
+            if self._associated:
+                self._associate(False)
 
     def freeze_pointer_motion(self) -> None:
-        """Undo the cursor motion that OS delivers before tap suppression."""
+        """Fallback for when disassociation/watchdog is unavailable."""
         with self._lock:
             if not self._pointer_frozen:
                 return
+            if not self._associated and self._watchdog_alive():
+                # Physical motion is disconnected from the cursor; warping here
+                # would only make macOS redraw the cursor.
+                return
+            if not self._associated:
+                log.warning("Cursor watchdog exited; restoring pointer association")
+                self._associate(True)
             Quartz.CGWarpMouseCursorPosition(
                 Quartz.CGPointMake(self._frozen_center[0], self._frozen_center[1])
             )

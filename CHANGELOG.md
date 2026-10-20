@@ -4,6 +4,25 @@ Barcha muhim o‘zgarishlar shu faylda qayd etiladi. Format
 [Keep a Changelog](https://keepachangelog.com/)ga asoslangan; versiyalar
 Semantic Versioning’ga ergashadi.
 
+## [1.0.10] — 2026-10-21
+
+### Fixed
+
+- Controller Mac’da per-event warp/hide ba’zi paytlarda lokal kursorni
+  ko‘rinadigan qilib qoldirardi. Endi forwarding paytida macOS fizik
+  sichqoncha kursoradan **butunlay disassociate** qilinadi: lokal kursor
+  qimirlamaydi, faqat peer kursori harakatlanadi.
+- Disassociation jarayon crash bo‘lsa sichqonchani qotib qoldirmasligi uchun
+  alohida **watchdog** jarayon stdin pipe orqali kuzatadi va ilova o‘lgan
+  zahoti `CGAssociateMouseAndMouseCursorPosition(True)` qiladi.
+- Har start’da association tiklanadi; oldingi crash holati self-healing.
+- Edge-return threshold 1.0.9’dagi 72 px / 0.6 s saqlanadi.
+
+### Compatibility
+
+- **Ikkala qurilmada ham 1.0.10** tavsiya etiladi (Windows 1.0.9+ return
+  threshold va 1.0.8+ keyboard/digit fixlari uchun).
+
 ## [1.0.9] — 2026-10-21
 
 ### Fixed

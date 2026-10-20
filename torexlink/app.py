@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import logging
 import os
@@ -18,6 +19,23 @@ from .ui.controller import ToRexLinkController
 from .ui.icons import logo_icon
 from .ui.main_window import MainWindow
 from .ui.onboarding import OnboardingDialog
+
+
+def _cursor_watchdog() -> int:
+    """Emergency cursor helper: reassociate if the main process disappears."""
+    try:
+        import Quartz
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        while os.read(0, 4096):
+            pass
+    except OSError:
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+    return 0
 
 
 def _argument_parser() -> argparse.ArgumentParser:
@@ -123,6 +141,9 @@ def _server_name(paths: AppPaths) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = sys.argv[1:] if argv is None else argv
+    if "--cursor-watchdog" in raw_argv:
+        return _cursor_watchdog()
     args, _qt_unknown = _argument_parser().parse_known_args(argv)
     if args.self_test:
         return _self_test()

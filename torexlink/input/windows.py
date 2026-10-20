@@ -654,6 +654,10 @@ class WindowsInputBackend:
                 items.append(item)
         self._send_input(items)
 
+    @staticmethod
+    def is_supported() -> bool:
+        return _IS_WINDOWS
+
     # ------------------------------------------------------------------ cursor
     def screen_size(self) -> tuple[int, int]:
         return (

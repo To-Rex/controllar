@@ -15,10 +15,6 @@ from .core.service import ToRexLinkService
 from .logging_setup import configure_logging, install_exception_logging
 from .paths import AppPaths
 from .settings import SettingsStore
-from .ui.controller import ToRexLinkController
-from .ui.icons import logo_icon
-from .ui.main_window import MainWindow
-from .ui.onboarding import OnboardingDialog
 
 
 def _cursor_watchdog() -> int:
@@ -147,10 +143,17 @@ def main(argv: list[str] | None = None) -> int:
     args, _qt_unknown = _argument_parser().parse_known_args(argv)
     if args.self_test:
         return _self_test()
+    # Lazy UI imports: the cursor watchdog process runs this same entry point
+    # and must stay lightweight (Qt import in a second instance is heavy and
+    # can fail), so everything Qt-related loads only for the real app.
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication
+    from .ui.controller import ToRexLinkController
+    from .ui.icons import logo_icon
+    from .ui.main_window import MainWindow
+    from .ui.onboarding import OnboardingDialog
 
     paths = AppPaths.discover()
     paths.ensure()

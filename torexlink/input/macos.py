@@ -300,11 +300,12 @@ class MacOSInputBackend:
             # Health timer: re-enable the tap and re-assert the pointer freeze
             # even when the OS disables/throttles the tap silently while the
             # app is backgrounded (we do not always receive the disabled-by-
-            # timeout event, so the timer is the reliable safety net).
+            # timeout event, so the timer is the reliable safety net). A
+            # 0.25s interval keeps any un-frozen window barely perceptible.
             timer = Quartz.CFRunLoopTimerCreate(
                 None,
-                Quartz.CFAbsoluteTimeGetCurrent() + 1.0,
-                1.0,
+                Quartz.CFAbsoluteTimeGetCurrent() + 0.25,
+                0.25,
                 0,
                 0,
                 self._tap_health_check,
@@ -895,8 +896,18 @@ class MacOSInputBackend:
                 # would only make macOS redraw the cursor.
                 return
             if not self._associated:
-                log.warning("Cursor watchdog exited; restoring pointer association")
-                self._associate(True)
+                # The watchdog died mid-freeze. NEVER re-associate while
+                # forwarding: an associated pointer follows the physical mouse,
+                # which is exactly the "cursor moves on the controller"
+                # symptom. Re-establish the freeze instead — this spawns a
+                # fresh watchdog and disassociates again.
+                log.warning("Cursor watchdog exited; re-freezing pointer")
+                self._associate(False)
+                return
+            # Associated but frozen (watchdog never started). Keep the cursor
+            # parked by warping it back; suppression at the tap still drops
+            # the physical moves.
+            log.warning("Pointer not disassociated while frozen; parking cursor")
             Quartz.CGWarpMouseCursorPosition(
                 Quartz.CGPointMake(self._frozen_center[0], self._frozen_center[1])
             )

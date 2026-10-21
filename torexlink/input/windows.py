@@ -597,16 +597,20 @@ class WindowsInputBackend:
         dy = int(round(event.dy * screen_h))
         if dx == 0 and dy == 0:
             return
-        item = INPUT(type=INPUT_MOUSE)
-        item.mi = MOUSEINPUT(
-            dx=dx,
-            dy=dy,
-            mouseData=0,
-            dwFlags=MOUSEEVENTF_MOVE,
-            time=0,
-            dwExtraInfo=_INJECT_TAG,
+        point = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(point))
+        target = (
+            max(0, min(screen_w - 1, point.x + dx)),
+            max(0, min(screen_h - 1, point.y + dy)),
         )
-        self._send_input([item])
+        with self._lock:
+            user32.SetCursorPos(target[0], target[1])
+            self._last_pointer = target
+            self._warp_target = target
+            self._warp_until = time.monotonic() + 0.15
+        verify = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(verify))
+        log.info("inject move -> (%d,%d) verify (%d,%d)", target[0], target[1], verify.x, verify.y)
 
     def _inject_button(self, event: InputButtonEvent) -> None:
         definition = _BUTTON_FLAGS.get(event.button)
@@ -782,8 +786,15 @@ class WindowsInputBackend:
                     if counter >= 0:
                         break
             else:
-                counter = user32.ShowCursor(False)
-                log.info("ShowCursor(FALSE) counter=%d", counter)
+                # A single ShowCursor(FALSE) decrement is NOT enough: the OS
+                # auto-shows the cursor on user activity, so the counter often
+                # sits at 0 or 1 and one decrement leaves the cursor visible.
+                # Loop until the counter is negative so a hide really hides.
+                for _ in range(32):
+                    counter = user32.ShowCursor(False)
+                    log.info("ShowCursor(FALSE) counter=%d", counter)
+                    if counter < 0:
+                        break
 
 
 __all__ = ["WindowsInputBackend"]

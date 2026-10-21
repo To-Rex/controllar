@@ -102,3 +102,47 @@ def test_moves_without_backend_suppression_flag_are_not_suppressed() -> None:
     )
     assert suppressed is False
     assert len(sent) == 1 and sent[0]["t"] == "move"
+
+
+def test_physical_mouse_motion_takes_over_when_receiving() -> None:
+    """Moving the local mouse while being driven must take control back.
+
+    Regression: the machine being driven ignored physical mouse motion
+    entirely (only clicks/keys could take over), so a mouse attached to
+    the second computer felt dead.
+    """
+    backend = FakeInputBackend()
+    bridge, _, focus_requests = _make_bridge(backend)
+    bridge.apply_focus(epoch=2, controller="peer", target="self", reason="edge")
+    bridge.start()
+    # A small bump stays below the takeover threshold.
+    bridge._handle_capture(InputMoveEvent(dx=0.0005, dy=0.0, x=10, y=10), False)
+    assert not any(action == "takeover" for action, _, _ in focus_requests)
+    # A deliberate swipe crosses it and requests takeover.
+    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=20, y=10), False)
+    assert any(action == "takeover" for action, _, _ in focus_requests)
+
+
+def test_return_requires_edge_dwell() -> None:
+    """A continuous pull-back through the entry edge must NOT return focus."""
+    import time as _time
+
+    backend = FakeInputBackend()
+    bridge, _, focus_requests = _make_bridge(backend)
+    bridge.apply_focus(
+        epoch=2, controller="peer", target="self", reason="edge", entry_edge="left"
+    )
+    bridge.start()
+    # Move into the screen to arm the return, let the settle window expire,
+    # then pull back THROUGH the edge in one continuous motion (no dwell).
+    bridge.handle_remote_event(InputMoveEvent(dx=0.05, dy=0.0))
+    _time.sleep(0.7)
+    bridge._virtual_pointer = (5.0, 5.0)
+    bridge.handle_remote_event(InputMoveEvent(dx=-0.01, dy=0.0))
+    bridge.handle_remote_event(InputMoveEvent(dx=-0.01, dy=0.0))
+    bridge.handle_remote_event(InputMoveEvent(dx=-0.01, dy=0.0))
+    assert not any(action == "return" for action, _, _ in focus_requests)
+    # Dwell at the edge, then push out: the return fires.
+    _time.sleep(0.4)
+    bridge.handle_remote_event(InputMoveEvent(dx=-0.05, dy=0.0))
+    assert any(action == "return" for action, _, _ in focus_requests)

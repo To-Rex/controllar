@@ -152,20 +152,22 @@ async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) ->
         await wait_for(lambda: len(host_backend.injected) > 0)
         assert any(isinstance(item, InputMoveEvent) for item in host_backend.injected)
 
-        # Moving the target's physical mouse must not steal focus (injected
-        # remote motion must never be mistaken for a takeover either).
+        # A small bump of the target's physical mouse must not steal focus
+        # (injected remote motion must never be mistaken for a takeover
+        # either).
         suppressed_move = host_backend.emit(
-            InputMoveEvent(dx=0.2, dy=0.1, x=800, y=600)
+            InputMoveEvent(dx=0.0005, dy=0.0, x=800, y=600)
         )
         assert suppressed_move is True
         await asyncio.sleep(0.45)
         assert host.snapshot().focus.local_target is True
         assert guest.snapshot().focus.local_controller is True
 
-        # A deliberate click/key is the takeover gesture.
-        suppressed = host_backend.emit(InputKeyEvent(key="a", pressed=True, mods=()))
+        # A deliberate mouse swipe IS the takeover gesture: the user touched
+        # that machine's mouse, so it becomes the active one.
+        suppressed = host_backend.emit(InputMoveEvent(dx=0.2, dy=0.1, x=800, y=600))
         assert suppressed is True
-        await wait_for(lambda: host.snapshot().focus.local_target is True)
+        await wait_for(lambda: host.snapshot().focus.local_controller is True)
         await wait_for(lambda: guest.snapshot().focus.local_controller is False)
         # The now-idle guest hides and freezes its pointer as well; only the
         # active computer should show a cursor.
@@ -343,9 +345,11 @@ async def test_edge_return_disarms_until_pointer_moves_inward(service_factory) -
         assert guest_focus.local_controller is True
         assert guest_focus.local_target is False
         # A deliberate additional outward push returns to the Mac; a small
-        # oscillation is not enough after the 72 px threshold.
+        # oscillation is not enough after the 72 px threshold. The push also
+        # requires the cursor to DWELL at the entry edge (0.3s) first, so a
+        # continuous pull-back can never return.
         guest_backend.emit(InputMoveEvent(dx=-0.02, dy=0.0, x=900, y=540))
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.5)
         assert guest.snapshot().focus is not None
         assert guest.snapshot().focus.local_target is False
         guest_backend.emit(InputMoveEvent(dx=-0.06, dy=0.0, x=900, y=540))

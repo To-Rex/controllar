@@ -6,7 +6,6 @@ import contextlib
 import logging
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -15,8 +14,10 @@ from ..constants import (
     EDGE_REARM_MARGIN_PX,
     EVENT_COOLDOWN_SECONDS,
     HOTKEY_LABEL,
+    LOCAL_MOTION_TAKEOVER,
+    LOCAL_MOTION_WINDOW_SECONDS,
+    REMOTE_RETURN_EDGE_DWELL_SECONDS,
     REMOTE_RETURN_PUSH_PX,
-    REMOTE_RETURN_PUSH_WINDOW_SECONDS,
     REMOTE_RETURN_REARM_MARGIN_PX,
     REMOTE_RETURN_SETTLE_SECONDS,
     SCREEN_EDGE_MARGIN_PX,
@@ -74,7 +75,10 @@ class InputBridge:
         self._edge_latched = False
         self._edge_armed = False
         self._remote_return_armed = False
-        self._remote_return_push_samples: deque[tuple[float, float]] = deque()
+        self._remote_return_push = 0.0
+        self._remote_return_edge_since: float | None = None
+        self._local_motion = 0.0
+        self._local_motion_at = 0.0
         self._receiving_since = 0.0
         self._injected_return_latched = False
         self._last_focus_request = 0.0
@@ -125,7 +129,10 @@ class InputBridge:
             self._injected_return_latched = False
             self._edge_armed = False
             self._remote_return_armed = False
-            self._remote_return_push_samples.clear()
+            self._remote_return_push = 0.0
+            self._remote_return_edge_since = None
+            self._local_motion = 0.0
+            self._local_motion_at = 0.0
             if controller == self.self_id and target == self.self_id:
                 # Every transition back to local must move the pointer into the
                 # screen before it can cross the same edge again. Otherwise a
@@ -344,16 +351,26 @@ class InputBridge:
             return True
 
         # Either this computer is currently being driven from the peer, or it
-        # is idle. Local pointer motion must never steal focus: injected remote
-        # motion can be indistinguishable in timing, and accidental movement
-        # would visibly re-enable this machine's cursor. A deliberate physical
-        # key press, mouse click or the hotkey takes control instead.
+        # is idle. Local pointer motion must never steal focus by accident,
+        # but a deliberate mouse movement is the universal takeover gesture:
+        # the user touched THIS mouse, so it becomes the active one. Small
+        # accumulated motion (a bump) stays below the threshold; a real swipe
+        # crosses it and takes over.
         if receiving or passive:
             if isinstance(event, InputMoveEvent):
                 ensure_hidden = getattr(self.backend, "ensure_cursor_hidden", None)
                 if ensure_hidden is not None:
                     with contextlib.suppress(Exception):
                         ensure_hidden()
+                with self._lock:
+                    if now - self._local_motion_at > LOCAL_MOTION_WINDOW_SECONDS:
+                        self._local_motion = 0.0
+                    self._local_motion += abs(event.dx) + abs(event.dy)
+                    self._local_motion_at = now
+                    take_over = self._local_motion >= LOCAL_MOTION_TAKEOVER
+                if take_over and now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
+                    self._local_motion = 0.0
+                    self._request_focus("takeover", None, None)
                 # Windows only reports useful deltas while its hidden cursor is
                 # allowed to move; macOS stays fully frozen.
                 return bool(getattr(self.backend, "suppress_moves_when_passive", True))
@@ -519,43 +536,49 @@ class InputBridge:
                         outward_travel = abs(event.dy) * height
                 if entry_edge is not None and not at_edge:
                     self._injected_return_latched = False
-                    self._remote_return_push_samples.clear()
+                    self._remote_return_push = 0.0
+                    self._remote_return_edge_since = None
                     if distance >= REMOTE_RETURN_REARM_MARGIN_PX:
                         self._remote_return_armed = True
                 if at_edge:
-                    # A single event that merely reaches the edge must not
-                    # return focus. The user has to push outward through the
-                    # edge QUICKLY: at least REMOTE_RETURN_PUSH_PX within a
-                    # short sliding window. A slow, natural mouse pull-back
-                    # passes through the entry edge without ever reaching the
-                    # threshold, so repositioning cannot bounce the cursor
-                    # back to the controller.
-                    if not was_at_edge or not should_return or not self._remote_return_armed:
-                        self._remote_return_push_samples.clear()
+                    # A deliberate return is a two-part gesture: the cursor
+                    # must DWELL at the entry edge (a short stop), and only
+                    # then push outward by REMOTE_RETURN_PUSH_PX. Natural
+                    # motion — a slow or fast pull-back, or lifting and
+                    # repositioning the physical mouse — sweeps through the
+                    # edge without stopping, so it can never bounce the
+                    # cursor back to the controller.
+                    if not was_at_edge:
+                        self._remote_return_edge_since = time.monotonic()
+                    if not should_return or not self._remote_return_armed:
+                        self._remote_return_push = 0.0
                     elif time.monotonic() - self._receiving_since >= REMOTE_RETURN_SETTLE_SECONDS:
-                        now = time.monotonic()
-                        samples = self._remote_return_push_samples
-                        while samples and now - samples[0][0] > REMOTE_RETURN_PUSH_WINDOW_SECONDS:
-                            samples.popleft()
-                        samples.append((now, outward_travel))
-                        push_total = sum(travel for _, travel in samples)
-                        if (
-                            push_total >= REMOTE_RETURN_PUSH_PX
-                            and not self._injected_return_latched
-                        ):
-                            self._injected_return_latched = True
-                            self._remote_return_armed = False
-                            self._remote_return_push_samples.clear()
-                            self._last_focus_request = time.monotonic()
-                            log.info(
-                                "Remote cursor pushed through target edge (%.1f px); returning focus",
-                                REMOTE_RETURN_PUSH_PX,
-                            )
-                            try:
-                                self.callbacks.request_focus("return", None, None)
-                            except Exception:  # noqa: BLE001
-                                log.debug("Return focus callback failed", exc_info=True)
-                            return
+                        edge_since = self._remote_return_edge_since
+                        dwell = time.monotonic() - (edge_since or time.monotonic())
+                        if dwell >= REMOTE_RETURN_EDGE_DWELL_SECONDS:
+                            self._remote_return_push += outward_travel
+                            if (
+                                self._remote_return_push >= REMOTE_RETURN_PUSH_PX
+                                and not self._injected_return_latched
+                            ):
+                                self._injected_return_latched = True
+                                self._remote_return_armed = False
+                                self._remote_return_push = 0.0
+                                self._remote_return_edge_since = None
+                                self._last_focus_request = time.monotonic()
+                                log.info(
+                                    "Remote cursor pushed through target edge (%.1f px); returning focus",
+                                    REMOTE_RETURN_PUSH_PX,
+                                )
+                                try:
+                                    self.callbacks.request_focus("return", None, None)
+                                except Exception:  # noqa: BLE001
+                                    log.debug("Return focus callback failed", exc_info=True)
+                                return
+                        else:
+                            # Still inside the pre-dwell window: motion at the
+                            # edge does not count as a push yet.
+                            self._remote_return_push = 0.0
                 del ratio_x, ratio_y, epoch
         try:
             self.backend.inject(event)

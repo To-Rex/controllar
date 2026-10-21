@@ -6,6 +6,7 @@ import contextlib
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +16,7 @@ from ..constants import (
     EVENT_COOLDOWN_SECONDS,
     HOTKEY_LABEL,
     REMOTE_RETURN_PUSH_PX,
+    REMOTE_RETURN_PUSH_WINDOW_SECONDS,
     REMOTE_RETURN_REARM_MARGIN_PX,
     REMOTE_RETURN_SETTLE_SECONDS,
     SCREEN_EDGE_MARGIN_PX,
@@ -72,7 +74,7 @@ class InputBridge:
         self._edge_latched = False
         self._edge_armed = False
         self._remote_return_armed = False
-        self._remote_return_push = 0.0
+        self._remote_return_push_samples: deque[tuple[float, float]] = deque()
         self._receiving_since = 0.0
         self._injected_return_latched = False
         self._last_focus_request = 0.0
@@ -123,7 +125,7 @@ class InputBridge:
             self._injected_return_latched = False
             self._edge_armed = False
             self._remote_return_armed = False
-            self._remote_return_push = 0.0
+            self._remote_return_push_samples.clear()
             if controller == self.self_id and target == self.self_id:
                 # Every transition back to local must move the pointer into the
                 # screen before it can cross the same edge again. Otherwise a
@@ -517,24 +519,33 @@ class InputBridge:
                         outward_travel = abs(event.dy) * height
                 if entry_edge is not None and not at_edge:
                     self._injected_return_latched = False
-                    self._remote_return_push = 0.0
+                    self._remote_return_push_samples.clear()
                     if distance >= REMOTE_RETURN_REARM_MARGIN_PX:
                         self._remote_return_armed = True
                 if at_edge:
                     # A single event that merely reaches the edge must not
-                    # return focus. The user has to keep pushing outward for
-                    # at least REMOTE_RETURN_PUSH_PX after arriving there.
+                    # return focus. The user has to push outward through the
+                    # edge QUICKLY: at least REMOTE_RETURN_PUSH_PX within a
+                    # short sliding window. A slow, natural mouse pull-back
+                    # passes through the entry edge without ever reaching the
+                    # threshold, so repositioning cannot bounce the cursor
+                    # back to the controller.
                     if not was_at_edge or not should_return or not self._remote_return_armed:
-                        self._remote_return_push = 0.0
+                        self._remote_return_push_samples.clear()
                     elif time.monotonic() - self._receiving_since >= REMOTE_RETURN_SETTLE_SECONDS:
-                        self._remote_return_push += outward_travel
+                        now = time.monotonic()
+                        samples = self._remote_return_push_samples
+                        while samples and now - samples[0][0] > REMOTE_RETURN_PUSH_WINDOW_SECONDS:
+                            samples.popleft()
+                        samples.append((now, outward_travel))
+                        push_total = sum(travel for _, travel in samples)
                         if (
-                            self._remote_return_push >= REMOTE_RETURN_PUSH_PX
+                            push_total >= REMOTE_RETURN_PUSH_PX
                             and not self._injected_return_latched
                         ):
                             self._injected_return_latched = True
                             self._remote_return_armed = False
-                            self._remote_return_push = 0.0
+                            self._remote_return_push_samples.clear()
                             self._last_focus_request = time.monotonic()
                             log.info(
                                 "Remote cursor pushed through target edge (%.1f px); returning focus",

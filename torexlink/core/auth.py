@@ -175,7 +175,9 @@ async def client_auth_exchange(
             peer_identity=stored_identity,
             peer_name=peer.name,
             peer_platform=peer.platform,
-            peer_app_version=peer.app_version or APP_VERSION,
+            # Use the LIVE server hello version, not the stale value stored
+            # when the peer was paired. The stored record is only a fallback.
+            peer_app_version=str(server.get("app_version") or peer.app_version or APP_VERSION),
             address=address,
             port=target_port,
         )

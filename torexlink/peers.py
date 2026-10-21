@@ -180,6 +180,7 @@ class PeerStore:
         *,
         address: str | None = None,
         port: int | None = None,
+        app_version: str | None = None,
     ) -> None:
         peers = self._load()
         record = peers.get(peer_id)
@@ -190,6 +191,8 @@ class PeerStore:
             record.last_address = address
         if port:
             record.last_port = port
+        if app_version:
+            record.app_version = app_version
         self._save(peers)
 
     def clear(self) -> None:

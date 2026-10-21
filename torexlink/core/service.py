@@ -924,6 +924,7 @@ class ToRexLinkService:
             record.peer_id,
             address=link.address,
             port=link.port,
+            app_version=link.peer_app_version,
         )
         record = self.peer_store.get(record.peer_id) or record
         session = PeerSession(
@@ -993,7 +994,12 @@ class ToRexLinkService:
         if not self._running or self._stopping:
             await link.stream.close()
             raise ServiceError("not_running")
-        self.peer_store.mark_seen(record.peer_id, address=link.address, port=link.port)
+        self.peer_store.mark_seen(
+            record.peer_id,
+            address=link.address,
+            port=link.port,
+            app_version=link.peer_app_version,
+        )
         record = self.peer_store.get(record.peer_id) or record
         session = PeerSession(
             link.stream,

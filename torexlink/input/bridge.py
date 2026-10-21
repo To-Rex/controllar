@@ -374,9 +374,26 @@ class InputBridge:
                     # the cursor directly, and pushing through the entry edge
                     # (dwell + push) is the return gesture back to the peer.
                     self._track_local_return(event)
+                else:
+                    # Cursor is on the peer: local motion must FOLLOW the
+                    # cursor, exactly like clicks — the machine whose mouse
+                    # the user touches becomes the one driving the cursor.
+                    # Two mice, one device: whichever mouse moves wins the
+                    # driving seat, never the cursor's screen.
+                    with self._lock:
+                        if now - self._pending_forward_at > 2.0:
+                            self._pending_forward.clear()
+                        if not self._pending_forward:
+                            self._pending_forward_at = now
+                        if len(self._pending_forward) < 32:
+                            self._pending_forward.append(event)
+                    if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
+                        self._request_focus("follow", None, None)
                 # Let local motion through on both machines: on the cursor's
                 # machine it moves the cursor; on the idle machine the cursor
-                # is frozen/hidden anyway (disassociation on macOS).
+                # is frozen/hidden anyway (disassociation on macOS), and on
+                # Windows the roaming hidden cursor is the delta source for
+                # the follow.
                 return bool(getattr(self.backend, "suppress_moves_when_passive", True))
             if isinstance(event, (InputKeyEvent, InputButtonEvent)):
                 if receiving:

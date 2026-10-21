@@ -474,3 +474,56 @@ async def test_passive_keyboard_follows_active_cursor(service_factory) -> None:
     finally:
         await guest.stop()
         await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_passive_mouse_motion_follows_cursor(service_factory) -> None:
+    """Moving the idle computer's mouse must take the DRIVING seat.
+
+    Two mice, one device: whichever physical mouse the user moves drives the
+    cursor, wherever the cursor is. A passive machine's motion follows the
+    cursor exactly like a click does.
+    """
+    from torexlink.input.events import InputMoveEvent
+
+    host, host_backend, _ = service_factory(name="movefollow-host", hosting=True)
+    guest, guest_backend, _ = service_factory(name="movefollow-guest", hosting=False)
+    try:
+        await host.start()
+        await guest.start()
+        pairing = await host.begin_pairing()
+        await guest.pair_with_payload(PairingPayload.parse(pairing.qr_uri))
+        await wait_for(lambda: guest.snapshot().connection is not None)
+        await wait_for(lambda: host.snapshot().connection is not None)
+        await wait_for(lambda: guest_backend.started and host_backend.started, timeout=6)
+        host_id = host.identity.device_id
+        guest_id = guest.identity.device_id
+
+        from torexlink.input.events import InputKeyEvent
+
+        host_backend.emit(InputKeyEvent(key="space", pressed=True, mods=("ctrl", "alt")))
+        await wait_for(
+            lambda: host.snapshot().focus is not None
+            and host.snapshot().focus.local_target
+            and host.snapshot().focus.local_controller
+        )
+
+        # The guest is passive (cursor on the host). Moving the GUEST's
+        # physical mouse must follow the cursor: the guest becomes the
+        # controller and its moves land on the host.
+        guest_backend.emit(InputMoveEvent(dx=0.01, dy=0.0, x=100, y=100))
+        await wait_for(
+            lambda: guest.snapshot().focus is not None
+            and guest.snapshot().focus.local_controller
+            and guest.snapshot().focus.target_id == host_id
+        )
+        await wait_for(
+            lambda: any(
+                isinstance(item, InputMoveEvent) for item in host_backend.injected
+            )
+        )
+        assert host.snapshot().focus is not None
+        assert host.snapshot().focus.local_target is True
+    finally:
+        await guest.stop()
+        await host.stop()

@@ -44,10 +44,24 @@ if [ -n "${CODESIGN_IDENTITY:-}" ]; then
     rm -f dist/ToRexLink-notarize.zip
   fi
 else
-  echo "No CODESIGN_IDENTITY set; applying an ad-hoc signature (local testing only)."
-  # Ad-hoc identities have no Team ID, so hardened runtime + library validation
-  # would prevent the PyInstaller app from loading its own Python dylib.
-  codesign --force --deep --sign - "$APP" || true
+  # Prefer a stable Apple Development identity over ad-hoc: macOS TCC
+  # permissions (Input Monitoring, Accessibility) are bound to the code
+  # signature, and an ad-hoc signature changes on every build, forcing the
+  # user to re-grant permissions each time. A team-signed build keeps them
+  # forever.
+  IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -o '"Apple Development: [^"]*"' | head -1 | tr -d '"')"
+  if [ -n "$IDENTITY" ]; then
+    echo "Signing with stable Apple Development identity: $IDENTITY"
+    codesign --force --deep --options runtime \
+      --entitlements packaging/entitlements.plist \
+      --sign "$IDENTITY" "$APP"
+  else
+    echo "No signing identity found; applying an ad-hoc signature (local testing only)."
+    # Ad-hoc identities have no Team ID, so hardened runtime + library validation
+    # would prevent the PyInstaller app from loading its own Python dylib.
+    codesign --force --deep --sign - "$APP" || true
+  fi
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP" || true

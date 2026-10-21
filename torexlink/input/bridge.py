@@ -407,16 +407,24 @@ class InputBridge:
         action: str,
         edge: str | None,
         position: float | None,
-    ) -> None:
+    ) -> bool:
+        """Send a focus request; returns False when throttled.
+
+        Callers that need delivery guarantees (edge crossing) must retry on
+        False — a throttled request is silently dropped otherwise, which
+        used to swallow edge crossings that raced a takeover/return.
+        """
         with self._lock:
             now = time.monotonic()
             if now - self._last_focus_request < 0.15:
-                return
+                return False
             self._last_focus_request = now
         try:
             self.callbacks.request_focus(action, edge, position)
+            return True
         except Exception:  # noqa: BLE001
             log.debug("Focus request callback failed", exc_info=True)
+            return False
 
     def _maybe_edge_switch(self, event: InputEvent, edge: str, enabled: bool) -> None:
         if not enabled or not isinstance(event, InputMoveEvent):
@@ -462,7 +470,14 @@ class InputBridge:
             # comfortably away from the edge before another switch can happen.
             self._edge_latched = True
             self._edge_armed = False
-        self._request_focus("edge", edge, position)
+        if not self._request_focus("edge", edge, position):
+            # Throttled (e.g. the request raced a takeover or return). Keep
+            # the edge armed so the user's continued push at the edge crosses
+            # as soon as the throttle window passes, instead of being
+            # silently swallowed and requiring a back-and-forth.
+            with self._lock:
+                self._edge_latched = False
+                self._edge_armed = True
 
     def _maybe_recenter(self, event: InputMoveEvent) -> None:
         width, height = self.backend.screen_size()

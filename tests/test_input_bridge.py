@@ -146,3 +146,23 @@ def test_return_requires_edge_dwell() -> None:
     _time.sleep(0.4)
     bridge.handle_remote_event(InputMoveEvent(dx=-0.05, dy=0.0))
     assert any(action == "return" for action, _, _ in focus_requests)
+
+
+def test_edge_crossing_retries_when_throttled() -> None:
+    """A crossing that races a takeover must not be silently swallowed."""
+    import time as _time
+
+    backend = FakeInputBackend()
+    bridge, _, focus_requests = _make_bridge(backend)
+    bridge.apply_focus(epoch=1, controller="self", target="self", reason="initial")
+    bridge.start()
+    # Occupy the focus-request throttle window (as a fresh takeover would).
+    assert bridge._request_focus("takeover", None, None) is True
+    width, _ = backend.screen_size()
+    # Immediate push to the edge: throttled, but the edge stays armed.
+    bridge._handle_capture(InputMoveEvent(dx=0.02, dy=0.0, x=width - 1, y=540), False)
+    assert not any(action == "edge" for action, _, _ in focus_requests)
+    # Continued push after the throttle window passes crosses.
+    _time.sleep(0.2)
+    bridge._handle_capture(InputMoveEvent(dx=0.02, dy=0.0, x=width - 1, y=540), False)
+    assert any(action == "edge" for action, _, _ in focus_requests)

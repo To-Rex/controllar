@@ -219,6 +219,21 @@ if _IS_WINDOWS:  # pragma: no cover - native code is exercised on Windows
     user32.SetCursorPos.restype = wintypes.BOOL
     user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
     user32.GetCursorPos.restype = wintypes.BOOL
+    user32.mouse_event.argtypes = [
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    user32.mouse_event.restype = None
+    user32.keybd_event.argtypes = [
+        ctypes.c_ubyte,
+        ctypes.c_ubyte,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    user32.keybd_event.restype = None
     user32.ShowCursor.argtypes = [wintypes.BOOL]
     user32.ShowCursor.restype = ctypes.c_int
     kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
@@ -501,16 +516,47 @@ class WindowsInputBackend:
 
     # --------------------------------------------------------------- injection
     def _send_input(self, items: list[INPUT]) -> None:
+        """Deliver synthetic input via the legacy APIs.
+
+        SendInput is unreliable on real systems: driver hooks can accept it
+        and then silently drop the events. Verified on the user's Windows
+        machine — SendInput moves AND buttons vanished (GetAsyncKeyState
+        confirmed the button never landed) while SetCursorPos, mouse_event
+        and keybd_event all work. The legacy APIs are what mainstream KVM
+        tools use for exactly this reason.
+        """
         if not items:
             return
-        array = (INPUT * len(items))(*items)
-        sent = user32.SendInput(len(items), array, ctypes.sizeof(INPUT))
-        if sent != len(items):
-            log.warning(
-                "SendInput delivered %s/%s events (error %s)",
-                sent,
-                len(items),
-                ctypes.get_last_error(),
+        for item in items:
+            if item.type == INPUT_MOUSE:
+                mi = item.mi
+                if mi.dwFlags & MOUSEEVENTF_MOVE:
+                    point = wintypes.POINT()
+                    user32.GetCursorPos(ctypes.byref(point))
+                    width, height = self.screen_size()
+                    target = (
+                        max(0, min(width - 1, point.x + mi.dx)),
+                        max(0, min(height - 1, point.y + mi.dy)),
+                    )
+                    # warp_pointer clamps, updates _last_pointer (so the hook's
+                    # next physical delta is measured from here) and sets the
+                    # echo-swallow window for the hook.
+                    self.warp_pointer(target[0], target[1])
+                    continue
+                user32.mouse_event(
+                    mi.dwFlags,
+                    0,
+                    0,
+                    mi.mouseData,
+                    ctypes.c_void_p(_INJECT_TAG),
+                )
+                continue
+            # Keyboard event.
+            user32.keybd_event(
+                item.ki.wVk,
+                0,
+                item.ki.dwFlags,
+                ctypes.c_void_p(_INJECT_TAG),
             )
 
     def _key_input(self, key: str, pressed: bool) -> INPUT | None:

@@ -14,8 +14,6 @@ from ..constants import (
     EDGE_REARM_MARGIN_PX,
     EVENT_COOLDOWN_SECONDS,
     HOTKEY_LABEL,
-    LOCAL_MOTION_TAKEOVER,
-    LOCAL_MOTION_WINDOW_SECONDS,
     REMOTE_RETURN_EDGE_DWELL_SECONDS,
     REMOTE_RETURN_PUSH_PX,
     REMOTE_RETURN_REARM_MARGIN_PX,
@@ -77,8 +75,9 @@ class InputBridge:
         self._remote_return_armed = False
         self._remote_return_push = 0.0
         self._remote_return_edge_since: float | None = None
-        self._local_motion = 0.0
-        self._local_motion_at = 0.0
+        self._local_return_push = 0.0
+        self._local_return_edge_since: float | None = None
+        self._local_return_latched = False
         self._receiving_since = 0.0
         self._injected_return_latched = False
         self._last_focus_request = 0.0
@@ -131,8 +130,9 @@ class InputBridge:
             self._remote_return_armed = False
             self._remote_return_push = 0.0
             self._remote_return_edge_since = None
-            self._local_motion = 0.0
-            self._local_motion_at = 0.0
+            self._local_return_push = 0.0
+            self._local_return_edge_since = None
+            self._local_return_latched = False
             if controller == self.self_id and target == self.self_id:
                 # Every transition back to local must move the pointer into the
                 # screen before it can cross the same edge again. Otherwise a
@@ -350,49 +350,42 @@ class InputBridge:
             self._send(event)
             return True
 
-        # Either this computer is currently being driven from the peer, or it
-        # is idle. Local pointer motion must never steal focus by accident,
-        # but a deliberate mouse movement is the universal takeover gesture:
-        # the user touched THIS mouse, so it becomes the active one. Small
-        # accumulated motion (a bump) stays below the threshold; a real swipe
-        # crosses it and takes over.
+        # "Two mice, one device": the machine the cursor is NOT on still
+        # forwards everything; the machine the cursor IS on applies local
+        # input directly. There is no takeover-on-input — the cursor's screen
+        # only changes via an edge crossing, a return gesture, or the hotkey.
         if receiving or passive:
             if isinstance(event, InputMoveEvent):
                 ensure_hidden = getattr(self.backend, "ensure_cursor_hidden", None)
                 if ensure_hidden is not None:
                     with contextlib.suppress(Exception):
                         ensure_hidden()
-                with self._lock:
-                    if now - self._local_motion_at > LOCAL_MOTION_WINDOW_SECONDS:
-                        self._local_motion = 0.0
-                    self._local_motion += abs(event.dx) + abs(event.dy)
-                    self._local_motion_at = now
-                    take_over = self._local_motion >= LOCAL_MOTION_TAKEOVER
-                if take_over and now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
-                    self._local_motion = 0.0
-                    self._request_focus("takeover", None, None)
-                # Windows only reports useful deltas while its hidden cursor is
-                # allowed to move; macOS stays fully frozen.
+                if receiving:
+                    # A local physical mouse on the cursor's machine drives
+                    # the cursor directly, and pushing through the entry edge
+                    # (dwell + push) is the return gesture back to the peer.
+                    self._track_local_return(event)
+                # Let local motion through on both machines: on the cursor's
+                # machine it moves the cursor; on the idle machine the cursor
+                # is frozen/hidden anyway (disassociation on macOS).
                 return bool(getattr(self.backend, "suppress_moves_when_passive", True))
             if isinstance(event, (InputKeyEvent, InputButtonEvent)):
                 if receiving:
-                    # Cursor is on this machine; the first key may switch
-                    # ownership locally.
-                    if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
-                        self._request_focus("takeover", None, None)
-                else:
-                    # Cursor is on the peer. Typing/clicking on this machine
-                    # must send input to the computer that owns the cursor,
-                    # not steal the cursor back here.
-                    with self._lock:
-                        if now - self._pending_forward_at > 2.0:
-                            self._pending_forward.clear()
-                        if not self._pending_forward:
-                            self._pending_forward_at = now
-                        if len(self._pending_forward) < 32:
-                            self._pending_forward.append(event)
-                    if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
-                        self._request_focus("follow", None, None)
+                    # The cursor is on this machine: local keys/clicks land
+                    # here, exactly like a second mouse on one computer.
+                    return False
+                # Cursor is on the peer. Typing/clicking on this machine
+                # must send input to the computer that owns the cursor,
+                # not steal the cursor back here.
+                with self._lock:
+                    if now - self._pending_forward_at > 2.0:
+                        self._pending_forward.clear()
+                    if not self._pending_forward:
+                        self._pending_forward_at = now
+                    if len(self._pending_forward) < 32:
+                        self._pending_forward.append(event)
+                if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
+                    self._request_focus("follow", None, None)
             return True
         return False
 
@@ -478,6 +471,70 @@ class InputBridge:
             with self._lock:
                 self._edge_latched = False
                 self._edge_armed = True
+
+    def _track_local_return(self, event: InputMoveEvent) -> None:
+        """Detect the return gesture made with THIS machine's own mouse.
+
+        While the peer drives this machine, the local physical mouse also
+        moves the cursor directly (two mice, one device). Pushing through the
+        entry edge with the same dwell+push gesture as the remote path
+        returns focus to the peer.
+        """
+        with self._lock:
+            entry_edge = self._entry_edge
+            latched = self._local_return_latched
+        if entry_edge is None or latched:
+            return
+        width, height = self.backend.screen_size()
+        if width <= 0 or height <= 0:
+            return
+        margin = SCREEN_EDGE_MARGIN_PX
+        at_edge = False
+        outward = False
+        travel = 0.0
+        if entry_edge == "left":
+            at_edge = event.x <= margin
+            outward = event.dx < 0
+            travel = abs(event.dx) * width
+        elif entry_edge == "right":
+            at_edge = event.x >= width - margin - 1
+            outward = event.dx > 0
+            travel = abs(event.dx) * width
+        elif entry_edge == "top":
+            at_edge = event.y <= margin
+            outward = event.dy < 0
+            travel = abs(event.dy) * height
+        else:
+            at_edge = event.y >= height - margin - 1
+            outward = event.dy > 0
+            travel = abs(event.dy) * height
+        with self._lock:
+            if not at_edge:
+                self._local_return_push = 0.0
+                self._local_return_edge_since = None
+                return
+            if self._local_return_edge_since is None:
+                self._local_return_edge_since = time.monotonic()
+            if not outward:
+                self._local_return_push = 0.0
+                return
+            if time.monotonic() - self._receiving_since < REMOTE_RETURN_SETTLE_SECONDS:
+                return
+            dwell = time.monotonic() - self._local_return_edge_since
+            if dwell < REMOTE_RETURN_EDGE_DWELL_SECONDS:
+                self._local_return_push = 0.0
+                return
+            self._local_return_push += travel
+            if self._local_return_push < REMOTE_RETURN_PUSH_PX:
+                return
+            self._local_return_latched = True
+            self._local_return_push = 0.0
+            self._local_return_edge_since = None
+        if self._request_focus("return", None, None):
+            return
+        # Throttled: keep the gesture live so continued pushing still returns.
+        with self._lock:
+            self._local_return_latched = False
 
     def _maybe_recenter(self, event: InputMoveEvent) -> None:
         width, height = self.backend.screen_size()

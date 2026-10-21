@@ -109,7 +109,7 @@ async def test_clipboard_sync_and_size_limit(service_factory) -> None:
 
 @pytest.mark.asyncio
 async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) -> None:
-    from torexlink.input.events import InputKeyEvent, InputMoveEvent
+    from torexlink.input.events import InputButtonEvent, InputKeyEvent, InputMoveEvent
 
     host, host_backend, _ = service_factory(name="focus-host", hosting=True)
     guest, guest_backend, _ = service_factory(name="focus-guest", hosting=False)
@@ -152,22 +152,31 @@ async def test_focus_switch_hotkey_remote_input_and_takeover(service_factory) ->
         await wait_for(lambda: len(host_backend.injected) > 0)
         assert any(isinstance(item, InputMoveEvent) for item in host_backend.injected)
 
-        # A small bump of the target's physical mouse must not steal focus
-        # (injected remote motion must never be mistaken for a takeover
-        # either).
+        # Two mice, one device: moving the target's own physical mouse moves
+        # the local cursor and must NOT change focus (no takeover-on-input).
         suppressed_move = host_backend.emit(
-            InputMoveEvent(dx=0.0005, dy=0.0, x=800, y=600)
+            InputMoveEvent(dx=0.2, dy=0.1, x=800, y=600)
         )
-        assert suppressed_move is True
+        assert suppressed_move is False  # local motion passes through
+        await asyncio.sleep(0.45)
+        assert host.snapshot().focus.local_target is True
+        assert guest.snapshot().focus.local_controller is True
+        # Local clicks on the cursor's machine land locally, still no focus
+        # change.
+        click_passed = host_backend.emit(
+            InputButtonEvent(button="left", pressed=True)
+        )
+        assert click_passed is False
         await asyncio.sleep(0.45)
         assert host.snapshot().focus.local_target is True
         assert guest.snapshot().focus.local_controller is True
 
-        # A deliberate mouse swipe IS the takeover gesture: the user touched
-        # that machine's mouse, so it becomes the active one.
-        suppressed = host_backend.emit(InputMoveEvent(dx=0.2, dy=0.1, x=800, y=600))
+        # The hotkey is the deliberate takeover gesture.
+        suppressed = host_backend.emit(
+            InputKeyEvent(key="space", pressed=True, mods=("ctrl", "alt"))
+        )
         assert suppressed is True
-        await wait_for(lambda: host.snapshot().focus.local_controller is True)
+        await wait_for(lambda: host.snapshot().focus.local_target is True)
         await wait_for(lambda: guest.snapshot().focus.local_controller is False)
         # The now-idle guest hides and freezes its pointer as well; only the
         # active computer should show a cursor.

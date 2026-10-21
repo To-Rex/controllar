@@ -104,23 +104,45 @@ def test_moves_without_backend_suppression_flag_are_not_suppressed() -> None:
     assert len(sent) == 1 and sent[0]["t"] == "move"
 
 
-def test_physical_mouse_motion_takes_over_when_receiving() -> None:
-    """Moving the local mouse while being driven must take control back.
+def test_receiving_clicks_and_moves_land_locally() -> None:
+    """Two mice, one device: while being driven, local input lands here."""
 
-    Regression: the machine being driven ignored physical mouse motion
-    entirely (only clicks/keys could take over), so a mouse attached to
-    the second computer felt dead.
-    """
     backend = FakeInputBackend()
     bridge, _, focus_requests = _make_bridge(backend)
     bridge.apply_focus(epoch=2, controller="peer", target="self", reason="edge")
     bridge.start()
-    # A small bump stays below the takeover threshold.
-    bridge._handle_capture(InputMoveEvent(dx=0.0005, dy=0.0, x=10, y=10), False)
-    assert not any(action == "takeover" for action, _, _ in focus_requests)
-    # A deliberate swipe crosses it and requests takeover.
-    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=20, y=10), False)
-    assert any(action == "takeover" for action, _, _ in focus_requests)
+    # Local mouse moves pass through to the local cursor.
+    suppressed = bridge._handle_capture(
+        InputMoveEvent(dx=0.01, dy=0.0, x=960, y=540), False
+    )
+    assert suppressed is False
+    # Local clicks land locally and must NOT request any focus change.
+    from torexlink.input.events import InputButtonEvent
+
+    suppressed = bridge._handle_capture(InputButtonEvent(button="left", pressed=True), False)
+    assert suppressed is False
+    assert focus_requests == []
+
+
+def test_local_return_gesture_with_own_mouse() -> None:
+    """Dwell+push through the entry edge with the LOCAL mouse returns focus."""
+    import time as _time
+
+    backend = FakeInputBackend()
+    bridge, _, focus_requests = _make_bridge(backend)
+    bridge.apply_focus(
+        epoch=2, controller="peer", target="self", reason="edge", entry_edge="left"
+    )
+    bridge.start()
+    width, _ = backend.screen_size()
+    # Continuous motion through the entry edge (no dwell) must NOT return.
+    for x in range(80, -20, -20):
+        bridge._handle_capture(InputMoveEvent(dx=-0.01, dy=0.0, x=max(0, x), y=540), False)
+    assert not any(action == "return" for action, _, _ in focus_requests)
+    # Dwell at the edge, then push out: the return fires.
+    _time.sleep(0.7)
+    bridge._handle_capture(InputMoveEvent(dx=-0.05, dy=0.0, x=0, y=540), False)
+    assert any(action == "return" for action, _, _ in focus_requests)
 
 
 def test_return_requires_edge_dwell() -> None:

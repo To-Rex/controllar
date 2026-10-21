@@ -88,7 +88,10 @@ class MacOSInputBackend:
     # disassociation, and any failure of that mechanism lets the controller
     # cursor keep moving while the peer cursor is being driven.
     suppress_moves_when_forwarding = True
-    suppress_moves_when_passive = True
+    # While the PEER drives this machine, the local physical mouse must still
+    # move the cursor directly (two mice, one device). The pointer freeze is
+    # handled by disassociation/hiding, not by dropping events.
+    suppress_moves_when_passive = False
 
     def __init__(self) -> None:
         if not _QUARTZ_AVAILABLE:

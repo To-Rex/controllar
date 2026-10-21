@@ -577,14 +577,22 @@ class InputBridge:
         pointer = self._saved_pointer or self.backend.pointer_position()
         if inset:
             width, height = self.backend.screen_size()
+            # Park PAST the rearm margin. If the cursor starts inside the
+            # rearm zone (distance < EDGE_REARM_MARGIN_PX) the edge can never
+            # arm before the cursor reaches it, so the first outward push
+            # after every return is silently swallowed — the "must try twice
+            # to cross" symptom. At this distance the edge arms on the first
+            # movement event, and a single continuous push crosses on the
+            # first attempt.
+            inset_px = EDGE_REARM_MARGIN_PX + 8
             if self.edge == "left":
-                pointer = (min(width - 1, 24), pointer[1])
+                pointer = (min(width - 1, inset_px), pointer[1])
             elif self.edge == "right":
-                pointer = (max(0, width - 25), pointer[1])
+                pointer = (max(0, width - inset_px - 1), pointer[1])
             elif self.edge == "top":
-                pointer = (pointer[0], min(height - 1, 24))
+                pointer = (pointer[0], min(height - 1, inset_px))
             else:
-                pointer = (pointer[0], max(0, height - 25))
+                pointer = (pointer[0], max(0, height - inset_px - 1))
         self.backend.warp_pointer(pointer[0], pointer[1])
 
     def _set_pointer_frozen(self, frozen: bool) -> None:

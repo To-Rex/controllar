@@ -79,6 +79,12 @@ def _fourcc_tag() -> int:
 
 class MacOSInputBackend:
     name = "macOS Quartz"
+    # Suppress local move events at the tap while this machine drives the
+    # peer. Without this, the local freeze depends entirely on pointer
+    # disassociation, and any failure of that mechanism lets the controller
+    # cursor keep moving while the peer cursor is being driven.
+    suppress_moves_when_forwarding = True
+    suppress_moves_when_passive = True
 
     def __init__(self) -> None:
         if not _QUARTZ_AVAILABLE:

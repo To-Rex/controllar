@@ -442,6 +442,13 @@ class WindowsInputBackend:
                 info.dwExtraInfo
             ) == _INJECT_TAG:
                 return user32.CallNextHookEx(self._mouse_hook, n_code, w_param, l_param)
+            # The OS auto-shows the cursor on any physical activity, undoing
+            # our hide (ShowCursor counter drifts back to >= 0). Re-assert the
+            # hide on every physical mouse event while the cursor is meant to
+            # be hidden — otherwise the idle machine's parked cursor becomes
+            # visible and the user sees two cursors ("parallel cursors").
+            if self._cursor_hidden:
+                self._apply_cursor_visibility()
             message = int(w_param)
             point = (int(info.pt.x), int(info.pt.y))
             if (
@@ -782,7 +789,7 @@ class WindowsInputBackend:
                 # hook thread responsive.
                 for _ in range(32):
                     counter = user32.ShowCursor(True)
-                    log.info("ShowCursor(TRUE) counter=%d", counter)
+                    log.debug("ShowCursor(TRUE) counter=%d", counter)
                     if counter >= 0:
                         break
             else:
@@ -792,7 +799,7 @@ class WindowsInputBackend:
                 # Loop until the counter is negative so a hide really hides.
                 for _ in range(32):
                     counter = user32.ShowCursor(False)
-                    log.info("ShowCursor(FALSE) counter=%d", counter)
+                    log.debug("ShowCursor(FALSE) counter=%d", counter)
                     if counter < 0:
                         break
 

@@ -717,7 +717,9 @@ class WindowsInputBackend:
             if self._thread_id and user32.PostThreadMessageW(
                 self._thread_id, WM_APP_CURSOR, 0, 0
             ):
+                log.info("cursor visibility -> %s (posted)", "show" if visible else "hide")
                 return
+            log.info("cursor visibility -> %s (inline)", "show" if visible else "hide")
             self._apply_cursor_visibility()
 
     def _apply_cursor_visibility(self) -> None:
@@ -730,12 +732,12 @@ class WindowsInputBackend:
                 # hook thread responsive.
                 for _ in range(32):
                     counter = user32.ShowCursor(True)
-                    log.debug("cursor show: counter=%d", counter)
+                    log.info("ShowCursor(TRUE) counter=%d", counter)
                     if counter >= 0:
                         break
             else:
                 counter = user32.ShowCursor(False)
-                log.debug("cursor hide: counter=%d", counter)
+                log.info("ShowCursor(FALSE) counter=%d", counter)
 
 
 __all__ = ["WindowsInputBackend"]

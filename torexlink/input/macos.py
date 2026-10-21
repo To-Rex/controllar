@@ -907,7 +907,10 @@ class MacOSInputBackend:
             # Associated but frozen (watchdog never started). Keep the cursor
             # parked by warping it back; suppression at the tap still drops
             # the physical moves.
-            log.warning("Pointer not disassociated while frozen; parking cursor")
+            now = time.monotonic()
+            if now - self._health_last_log > 5.0:
+                self._health_last_log = now
+                log.warning("Pointer not disassociated while frozen; parking cursor")
             Quartz.CGWarpMouseCursorPosition(
                 Quartz.CGPointMake(self._frozen_center[0], self._frozen_center[1])
             )

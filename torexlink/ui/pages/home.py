@@ -433,12 +433,16 @@ class HomePage(QWidget):
         self._panel_signature = signature
         while self.peer_content_layout.count():
             item = self.peer_content_layout.takeAt(0)
-            if item and item.widget():
+            # Grab the widget ONCE: with deferred deleteLater deletion from a
+            # previous refresh, repeated item.widget() calls can return
+            # different results and crash on a None deref.
+            widget = item.widget() if item is not None else None
+            if widget is not None:
                 # Hide synchronously; deleteLater alone can leave the old
                 # labels painted over the new row for one frame.
-                item.widget().hide()
-                item.widget().setParent(None)
-                item.widget().deleteLater()
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
         connection = snapshot.connection
         if connection is None:
             self.focus_title.setText(t("home_focus_now"))

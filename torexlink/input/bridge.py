@@ -126,6 +126,14 @@ class InputBridge:
             self._entry_position = position
             self._edge_latched = False
             self._injected_return_latched = False
+            log.debug(
+                "focus %s: controller=%s target=%s reason=%s entry_edge=%s",
+                epoch,
+                controller,
+                target,
+                reason,
+                entry_edge,
+            )
             self._edge_armed = False
             self._remote_return_armed = False
             self._remote_return_push = 0.0
@@ -523,6 +531,14 @@ class InputBridge:
                 if distance >= REMOTE_RETURN_REARM_MARGIN_PX:
                     self._local_return_armed = True
                 return
+            log.debug(
+                "local return: at %s edge x=%.0f dx=%.4f armed=%s push=%.0f",
+                entry_edge,
+                event.x,
+                event.dx,
+                self._local_return_armed,
+                self._local_return_push,
+            )
             if not outward or not self._local_return_armed:
                 self._local_return_push = 0.0
                 return

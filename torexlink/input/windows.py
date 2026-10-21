@@ -237,6 +237,11 @@ _BUTTON_FLAGS = {
 
 class WindowsInputBackend:
     name = "Windows low-level hooks"
+    # Two mice, one device: while the PEER drives this machine, the local
+    # physical mouse must still move the cursor directly (it is the cursor's
+    # machine). While idle, the hidden cursor may roam freely without harm.
+    # The default True would swallow every local move while receiving, which
+    # froze the cursor AND starved the local return detector.
     suppress_moves_when_passive = False
 
     def __init__(self) -> None:
@@ -724,10 +729,13 @@ class WindowsInputBackend:
                 # can never leave the cursor invisible. Capped to keep the
                 # hook thread responsive.
                 for _ in range(32):
-                    if user32.ShowCursor(True) >= 0:
+                    counter = user32.ShowCursor(True)
+                    log.debug("cursor show: counter=%d", counter)
+                    if counter >= 0:
                         break
             else:
-                user32.ShowCursor(False)
+                counter = user32.ShowCursor(False)
+                log.debug("cursor hide: counter=%d", counter)
 
 
 __all__ = ["WindowsInputBackend"]

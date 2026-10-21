@@ -111,11 +111,12 @@ def test_receiving_clicks_and_moves_land_locally() -> None:
     bridge, _, focus_requests = _make_bridge(backend)
     bridge.apply_focus(epoch=2, controller="peer", target="self", reason="edge")
     bridge.start()
-    # Local mouse moves pass through to the local cursor.
+    # A tiny bump stays below the takeover threshold.
     suppressed = bridge._handle_capture(
-        InputMoveEvent(dx=0.01, dy=0.0, x=960, y=540), False
+        InputMoveEvent(dx=0.001, dy=0.0, x=960, y=540), False
     )
     assert suppressed is False
+    assert not any(action == "takeover" for action, _, _ in focus_requests)
     # Local clicks land locally and must NOT request any focus change.
     from torexlink.input.events import InputButtonEvent
 
@@ -124,8 +125,31 @@ def test_receiving_clicks_and_moves_land_locally() -> None:
     assert focus_requests == []
 
 
-def test_local_return_gesture_with_own_mouse() -> None:
-    """Push through the entry edge with the LOCAL mouse returns focus."""
+def test_receiving_mouse_swipe_takes_over() -> None:
+    """A deliberate swipe of the driven machine's own mouse takes control.
+
+    The peer stops forwarding so the two mice never fight over the cursor.
+    """
+    backend = FakeInputBackend()
+    bridge, _, focus_requests = _make_bridge(backend)
+    bridge.apply_focus(epoch=2, controller="peer", target="self", reason="edge")
+    bridge.start()
+    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=960, y=540), False)
+    assert any(action == "takeover" for action, _, _ in focus_requests)
+
+
+def test_passive_mouse_motion_takes_over() -> None:
+    """Moving the idle machine's mouse pulls the cursor to that machine."""
+    backend = FakeInputBackend()
+    bridge, _, focus_requests = _make_bridge(backend)
+    bridge.apply_focus(epoch=2, controller="peer", target="peer", reason="initial")
+    bridge.start()
+    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=100, y=100), False)
+    assert any(action == "takeover" for action, _, _ in focus_requests)
+
+
+def test_receiving_takeover_then_entry_edge_crosses_back() -> None:
+    """Grab the driven cursor, then push it back through the entry edge."""
     import time as _time
 
     backend = FakeInputBackend()
@@ -134,18 +158,21 @@ def test_local_return_gesture_with_own_mouse() -> None:
         epoch=2, controller="peer", target="self", reason="edge", entry_edge="left"
     )
     bridge.start()
-    # A push through the entry edge right after the entry warp (not armed
-    # yet — the cursor never moved into the screen) must NOT return.
-    for x in (2, 0, 0):
-        bridge._handle_capture(InputMoveEvent(dx=-0.01, dy=0.0, x=x, y=540), False)
-    assert not any(action == "return" for action, _, _ in focus_requests)
-    # Move well into the screen (arms the return), settle, then push back
-    # out through the entry edge: the return fires.
-    bridge._handle_capture(InputMoveEvent(dx=0.05, dy=0.0, x=96, y=540), False)
-    _time.sleep(0.7)
-    for x in (40, 0, 0):
-        bridge._handle_capture(InputMoveEvent(dx=-0.05, dy=0.0, x=x, y=540), False)
-    assert any(action == "return" for action, _, _ in focus_requests)
+    # A swipe of the local mouse takes over — the cursor stays here.
+    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=960, y=540), False)
+    assert any(action == "takeover" for action, _, _ in focus_requests)
+    # The takeover preserves the entry edge (the bridge keeps it when the
+    # transition carries none)...
+    bridge.apply_focus(epoch=3, controller="self", target="self", reason="takeover")
+    assert bridge._entry_edge == "left"
+    # ...so after a rearm move into the screen, pushing through the entry
+    # edge crosses back to the peer like a real monitor edge.
+    _time.sleep(0.2)
+    bridge._handle_capture(InputMoveEvent(dx=0.02, dy=0.0, x=200, y=540), False)
+    bridge._handle_capture(InputMoveEvent(dx=-0.01, dy=0.0, x=0, y=540), False)
+    assert any(
+        action == "edge" and edge == "left" for action, edge, _ in focus_requests
+    )
 
 
 def test_return_requires_arming() -> None:

@@ -14,6 +14,8 @@ from ..constants import (
     EDGE_REARM_MARGIN_PX,
     EVENT_COOLDOWN_SECONDS,
     HOTKEY_LABEL,
+    LOCAL_MOTION_TAKEOVER,
+    LOCAL_MOTION_WINDOW_SECONDS,
     REMOTE_RETURN_PUSH_PX,
     REMOTE_RETURN_REARM_MARGIN_PX,
     REMOTE_RETURN_SETTLE_SECONDS,
@@ -78,6 +80,9 @@ class InputBridge:
         self._local_return_edge_since: float | None = None
         self._local_return_armed = False
         self._local_return_latched = False
+        self._local_return_active = False
+        self._local_motion = 0.0
+        self._local_motion_at = 0.0
         self._receiving_since = 0.0
         self._injected_return_latched = False
         self._last_focus_request = 0.0
@@ -122,7 +127,12 @@ class InputBridge:
             self._controller = controller
             self._target = target
             self._reason = reason
-            self._entry_edge = entry_edge
+            # Preserve the entry edge when the transition does not carry one:
+            # a takeover on the machine being driven keeps the knowledge of
+            # which edge leads back to the peer, so a push through it crosses
+            # like a real monitor edge.
+            if entry_edge is not None:
+                self._entry_edge = entry_edge
             self._entry_position = position
             self._edge_latched = False
             self._injected_return_latched = False
@@ -142,6 +152,9 @@ class InputBridge:
             self._local_return_edge_since = None
             self._local_return_armed = False
             self._local_return_latched = False
+            self._local_return_active = False
+            self._local_motion = 0.0
+            self._local_motion_at = 0.0
             if controller == self.self_id and target == self.self_id:
                 # Every transition back to local must move the pointer into the
                 # screen before it can cross the same edge again. Otherwise a
@@ -333,6 +346,13 @@ class InputBridge:
 
         if local_active:
             self._maybe_edge_switch(event, edge, edge_switch)
+            with self._lock:
+                entry = self._entry_edge
+            if entry and entry != edge:
+                # The entry edge (the side the peer sits on) also crosses —
+                # it survives a takeover so the grabbed cursor can be pushed
+                # back through the same edge it came in from.
+                self._maybe_edge_switch(event, entry, edge_switch)
             return False
 
         if forwarding:
@@ -363,37 +383,34 @@ class InputBridge:
         # forwards everything; the machine the cursor IS on applies local
         # input directly. There is no takeover-on-input — the cursor's screen
         # only changes via an edge crossing, a return gesture, or the hotkey.
+        # The machine the cursor is NOT on: touching its physical mouse pulls
+        # the cursor HERE (takeover — the cursor's screen changes), so the
+        # mouse you touch always works on ITS screen, like two mice on one
+        # device. The machine the cursor IS on: local moves drive the cursor
+        # directly and steal the driving seat from the peer (takeover too —
+        # the peer stops forwarding so the two mice never fight over the
+        # cursor), while a push through the entry edge returns focus.
         if receiving or passive:
             if isinstance(event, InputMoveEvent):
                 ensure_hidden = getattr(self.backend, "ensure_cursor_hidden", None)
                 if ensure_hidden is not None:
                     with contextlib.suppress(Exception):
                         ensure_hidden()
-                if receiving:
-                    # A local physical mouse on the cursor's machine drives
-                    # the cursor directly, and pushing through the entry edge
-                    # (dwell + push) is the return gesture back to the peer.
-                    self._track_local_return(event)
-                else:
-                    # Cursor is on the peer: local motion must FOLLOW the
-                    # cursor, exactly like clicks — the machine whose mouse
-                    # the user touches becomes the one driving the cursor.
-                    # Two mice, one device: whichever mouse moves wins the
-                    # driving seat, never the cursor's screen.
+                with self._lock:
+                    if now - self._local_motion_at > LOCAL_MOTION_WINDOW_SECONDS:
+                        self._local_motion = 0.0
+                    self._local_motion += abs(event.dx) + abs(event.dy)
+                    self._local_motion_at = now
+                    take_over = self._local_motion >= LOCAL_MOTION_TAKEOVER
+                if take_over and now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
                     with self._lock:
-                        if now - self._pending_forward_at > 2.0:
-                            self._pending_forward.clear()
-                        if not self._pending_forward:
-                            self._pending_forward_at = now
-                        if len(self._pending_forward) < 32:
-                            self._pending_forward.append(event)
-                    if now - self._last_focus_request >= EVENT_COOLDOWN_SECONDS:
-                        self._request_focus("follow", None, None)
+                        self._local_motion = 0.0
+                    self._request_focus("takeover", None, None)
                 # Let local motion through on both machines: on the cursor's
                 # machine it moves the cursor; on the idle machine the cursor
                 # is frozen/hidden anyway (disassociation on macOS), and on
                 # Windows the roaming hidden cursor is the delta source for
-                # the follow.
+                # the takeover.
                 return bool(getattr(self.backend, "suppress_moves_when_passive", True))
             if isinstance(event, (InputKeyEvent, InputButtonEvent)):
                 if receiving:
@@ -545,6 +562,7 @@ class InputBridge:
             if not at_edge:
                 self._local_return_push = 0.0
                 self._local_return_edge_since = None
+                self._local_return_active = False
                 if distance >= REMOTE_RETURN_REARM_MARGIN_PX:
                     self._local_return_armed = True
                 return
@@ -558,25 +576,32 @@ class InputBridge:
             )
             if not outward or not self._local_return_armed:
                 self._local_return_push = 0.0
+                self._local_return_active = False
                 return
             if time.monotonic() - self._receiving_since < REMOTE_RETURN_SETTLE_SECONDS:
+                self._local_return_active = True
                 return
+            # A deliberate return gesture is in progress: suppress the
+            # motion-takeover so the edge push wins over the grab.
+            self._local_return_active = True
             self._local_return_push += travel
             if self._local_return_push < REMOTE_RETURN_PUSH_PX:
                 return
-            self._local_return_latched = True
-            self._local_return_push = 0.0
-            self._local_return_edge_since = None
-            self._local_return_armed = False
         log.info(
             "Local cursor pushed through entry edge (%.1f px); returning focus",
             REMOTE_RETURN_PUSH_PX,
         )
         if self._request_focus("return", None, None):
+            with self._lock:
+                self._local_return_latched = True
+                self._local_return_push = 0.0
+                self._local_return_edge_since = None
+                self._local_return_armed = False
+                self._local_return_active = False
             return
-        # Throttled: keep the gesture live so continued pushing still returns.
-        with self._lock:
-            self._local_return_latched = False
+        # Throttled: keep the gesture armed and accumulating so the continued
+        # push retries until the throttle window passes — a return must never
+        # be swallowed (same rule as the edge crossing).
 
     def _maybe_recenter(self, event: InputMoveEvent) -> None:
         width, height = self.backend.screen_size()

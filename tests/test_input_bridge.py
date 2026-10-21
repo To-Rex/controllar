@@ -125,7 +125,7 @@ def test_receiving_clicks_and_moves_land_locally() -> None:
 
 
 def test_local_return_gesture_with_own_mouse() -> None:
-    """Dwell+push through the entry edge with the LOCAL mouse returns focus."""
+    """Push through the entry edge with the LOCAL mouse returns focus."""
     import time as _time
 
     backend = FakeInputBackend()
@@ -134,19 +134,23 @@ def test_local_return_gesture_with_own_mouse() -> None:
         epoch=2, controller="peer", target="self", reason="edge", entry_edge="left"
     )
     bridge.start()
-    width, _ = backend.screen_size()
-    # Continuous motion through the entry edge (no dwell) must NOT return.
-    for x in range(80, -20, -20):
-        bridge._handle_capture(InputMoveEvent(dx=-0.01, dy=0.0, x=max(0, x), y=540), False)
+    # A push through the entry edge right after the entry warp (not armed
+    # yet — the cursor never moved into the screen) must NOT return.
+    for x in (2, 0, 0):
+        bridge._handle_capture(InputMoveEvent(dx=-0.01, dy=0.0, x=x, y=540), False)
     assert not any(action == "return" for action, _, _ in focus_requests)
-    # Dwell at the edge, then push out: the return fires.
+    # Move well into the screen (arms the return), settle, then push back
+    # out through the entry edge: the return fires.
+    bridge._handle_capture(InputMoveEvent(dx=0.05, dy=0.0, x=96, y=540), False)
     _time.sleep(0.7)
-    bridge._handle_capture(InputMoveEvent(dx=-0.05, dy=0.0, x=0, y=540), False)
+    for x in (40, 0, 0):
+        bridge._handle_capture(InputMoveEvent(dx=-0.05, dy=0.0, x=x, y=540), False)
     assert any(action == "return" for action, _, _ in focus_requests)
 
 
-def test_return_requires_edge_dwell() -> None:
-    """A continuous pull-back through the entry edge must NOT return focus."""
+def test_return_requires_arming() -> None:
+    """A pull-back through the entry edge must NOT return focus before the
+    cursor has moved into the screen (rearm margin)."""
     import time as _time
 
     backend = FakeInputBackend()
@@ -163,8 +167,10 @@ def test_return_requires_edge_dwell() -> None:
     bridge.handle_remote_event(InputMoveEvent(dx=-0.01, dy=0.0))
     bridge.handle_remote_event(InputMoveEvent(dx=-0.01, dy=0.0))
     bridge.handle_remote_event(InputMoveEvent(dx=-0.01, dy=0.0))
+    # Continuous push after the cursor is back at the edge: accumulates but
+    # stays below the push threshold, so no return.
     assert not any(action == "return" for action, _, _ in focus_requests)
-    # Dwell at the edge, then push out: the return fires.
+    # One more solid push crosses the threshold: the return fires.
     _time.sleep(0.4)
     bridge.handle_remote_event(InputMoveEvent(dx=-0.05, dy=0.0))
     assert any(action == "return" for action, _, _ in focus_requests)

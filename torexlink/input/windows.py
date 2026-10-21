@@ -43,6 +43,12 @@ _INJECT_TAG = 0x544F5245
 WH_KEYBOARD_LL = 13
 WH_MOUSE_LL = 14
 WM_QUIT = 0x0012
+# Private thread message: apply the desired cursor visibility on the hook
+# thread. ShowCursor's display counter belongs to the calling thread's input
+# queue, so all hide/show work must run on ONE thread — the hook thread that
+# owns the message loop — otherwise a show from a different thread cannot
+# cancel an earlier hide.
+WM_APP_CURSOR = 0x8001
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
@@ -311,6 +317,9 @@ class WindowsInputBackend:
             self._ready.set()
             msg = MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == WM_APP_CURSOR:
+                    self._apply_cursor_visibility()
+                    continue
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
         except Exception as exc:  # noqa: BLE001
@@ -338,7 +347,10 @@ class WindowsInputBackend:
         with self._lock:
             self.release_injected_keys()
             self.release_local_modifiers()
-            self.set_cursor_visible(True)
+            # Apply inline: the hook thread may already have exited, and a
+            # message posted after WM_QUIT would never be processed.
+            self._cursor_hidden = False
+            self._apply_cursor_visibility()
         self._callback = None
         log.info("Windows input hooks stopped")
 
@@ -685,15 +697,37 @@ class WindowsInputBackend:
         self.warp_pointer(width // 2, height // 2)
 
     def set_cursor_visible(self, visible: bool) -> None:
-        if visible == (not self._cursor_hidden):
-            return
+        """Set the desired cursor visibility.
+
+        ShowCursor's display counter is tied to the input queue of the thread
+        that calls it: a hide from one thread cannot be undone by a show from
+        another. All show/hide work is therefore marshalled to the hook
+        thread's message loop (WM_APP_CURSOR). Falls back to an inline apply
+        before the loop starts or after it stops.
+        """
         with self._lock:
-            if visible:
-                user32.ShowCursor(True)
-                self._cursor_hidden = False
+            if visible == (not self._cursor_hidden):
+                return
+            self._cursor_hidden = not visible
+            if self._thread_id and user32.PostThreadMessageW(
+                self._thread_id, WM_APP_CURSOR, 0, 0
+            ):
+                return
+            self._apply_cursor_visibility()
+
+    def _apply_cursor_visibility(self) -> None:
+        """Apply the desired visibility on the current thread."""
+        with self._lock:
+            if not self._cursor_hidden:
+                # ShowCursor returns the counter after the call; loop until it
+                # is non-negative so a drifted or double-decremented counter
+                # can never leave the cursor invisible. Capped to keep the
+                # hook thread responsive.
+                for _ in range(32):
+                    if user32.ShowCursor(True) >= 0:
+                        break
             else:
                 user32.ShowCursor(False)
-                self._cursor_hidden = True
 
 
 __all__ = ["WindowsInputBackend"]

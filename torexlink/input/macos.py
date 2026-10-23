@@ -393,13 +393,21 @@ class MacOSInputBackend:
                 log.warning("Event tap was disabled; re-enabled by health check")
             if not frozen:
                 return
+            # The OS can silently RE-associate the pointer without flipping
+            # our flag (macOS 27 does this while the user keeps moving the
+            # physical mouse). Re-assert the disassociation every tick — it
+            # is idempotent — so the local cursor stays parked instead of
+            # following the physical mouse alongside the peer cursor.
+            with contextlib.suppress(Exception):
+                Quartz.CGAssociateMouseAndMouseCursorPosition(False)
             if associated:
-                # The OS silently reassociated the pointer; freeze it again.
+                # Update our own flag bookkeeping (watchdog stays up).
                 now = time.monotonic()
                 if now - self._health_last_log > 5.0:
                     self._health_last_log = now
                     log.warning("Pointer reassociated while forwarding; re-freezing")
-                self._associate(False)
+                self._associated = False
+                log.debug("macOS pointer disassociated for forwarding (health re-assert)")
             if hidden:
                 self.ensure_cursor_hidden()
         except Exception:  # noqa: BLE001

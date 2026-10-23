@@ -241,8 +241,8 @@ if _IS_WINDOWS:  # pragma: no cover - native code is exercised on Windows
     user32.ShowCursor.restype = ctypes.c_int
     user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
     user32.LoadCursorW.restype = wintypes.HANDLE
-    user32.CopyCursor.argtypes = [wintypes.HANDLE]
-    user32.CopyCursor.restype = wintypes.HANDLE
+    user32.CopyIcon.argtypes = [wintypes.HANDLE]
+    user32.CopyIcon.restype = wintypes.HANDLE
     user32.CreateCursor.argtypes = [
         wintypes.HINSTANCE,
         ctypes.c_int,
@@ -361,7 +361,7 @@ class WindowsInputBackend:
             # heals that state (idempotent when it was never blanked).
             with contextlib.suppress(Exception):
                 user32.SetSystemCursor(
-                    user32.CopyCursor(
+                    user32.CopyIcon(
                         user32.LoadCursorW(None, ctypes.c_void_p(OCR_NORMAL))
                     ),
                     OCR_NORMAL,
@@ -840,7 +840,7 @@ class WindowsInputBackend:
                         break
             else:
                 if self._saved_system_cursor is None:
-                    original = user32.CopyCursor(
+                    original = user32.CopyIcon(
                         user32.LoadCursorW(None, ctypes.c_void_p(OCR_NORMAL))
                     )
                     blank = self._make_blank_cursor()

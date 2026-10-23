@@ -498,7 +498,7 @@ async def test_passive_mouse_motion_takes_over_cursor(service_factory) -> None:
 
         # The guest is passive (cursor on the host). Moving the GUEST's
         # physical mouse must pull the cursor to the guest's screen.
-        guest_backend.emit(InputMoveEvent(dx=0.01, dy=0.0, x=100, y=100))
+        guest_backend.emit(InputMoveEvent(dx=0.012, dy=0.0, x=100, y=100))
         await wait_for(
             lambda: guest.snapshot().focus is not None
             and guest.snapshot().focus.local_controller

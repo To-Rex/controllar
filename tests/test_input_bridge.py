@@ -134,7 +134,7 @@ def test_receiving_mouse_swipe_takes_over() -> None:
     bridge, _, focus_requests = _make_bridge(backend)
     bridge.apply_focus(epoch=2, controller="peer", target="self", reason="edge")
     bridge.start()
-    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=960, y=540), False)
+    bridge._handle_capture(InputMoveEvent(dx=0.012, dy=0.0, x=960, y=540), False)
     assert any(action == "takeover" for action, _, _ in focus_requests)
 
 
@@ -144,7 +144,7 @@ def test_passive_mouse_motion_takes_over() -> None:
     bridge, _, focus_requests = _make_bridge(backend)
     bridge.apply_focus(epoch=2, controller="peer", target="peer", reason="initial")
     bridge.start()
-    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=100, y=100), False)
+    bridge._handle_capture(InputMoveEvent(dx=0.012, dy=0.0, x=100, y=100), False)
     assert any(action == "takeover" for action, _, _ in focus_requests)
 
 
@@ -159,7 +159,7 @@ def test_receiving_takeover_then_entry_edge_crosses_back() -> None:
     )
     bridge.start()
     # A swipe of the local mouse takes over — the cursor stays here.
-    bridge._handle_capture(InputMoveEvent(dx=0.004, dy=0.0, x=960, y=540), False)
+    bridge._handle_capture(InputMoveEvent(dx=0.012, dy=0.0, x=960, y=540), False)
     assert any(action == "takeover" for action, _, _ in focus_requests)
     # The takeover preserves the entry edge (the bridge keeps it when the
     # transition carries none)...

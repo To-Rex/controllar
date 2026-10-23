@@ -13,6 +13,7 @@ blocked until ownership changes.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import logging
 import threading

@@ -48,7 +48,10 @@ WM_QUIT = 0x0012
 # queue, so all hide/show work must run on ONE thread — the hook thread that
 # owns the message loop — otherwise a show from a different thread cannot
 # cancel an earlier hide.
+OCR_NORMAL = 32512
 WM_APP_CURSOR = 0x8001
+
+
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
@@ -236,6 +239,22 @@ if _IS_WINDOWS:  # pragma: no cover - native code is exercised on Windows
     user32.keybd_event.restype = None
     user32.ShowCursor.argtypes = [wintypes.BOOL]
     user32.ShowCursor.restype = ctypes.c_int
+    user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
+    user32.LoadCursorW.restype = wintypes.HANDLE
+    user32.CopyCursor.argtypes = [wintypes.HANDLE]
+    user32.CopyCursor.restype = wintypes.HANDLE
+    user32.CreateCursor.argtypes = [
+        wintypes.HINSTANCE,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    user32.CreateCursor.restype = wintypes.HANDLE
+    user32.SetSystemCursor.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    user32.SetSystemCursor.restype = wintypes.BOOL
     kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
     kernel32.GetModuleHandleW.restype = wintypes.HMODULE
     kernel32.GetCurrentThreadId.restype = wintypes.DWORD
@@ -280,6 +299,8 @@ class WindowsInputBackend:
         self._injected_buttons_down: set[str] = set()
         self._last_pointer: tuple[int, int] | None = None
         self._cursor_hidden = False
+        self._blank_cursor: Any = None
+        self._saved_system_cursor: Any = None
         self._warp_target: tuple[int, int] | None = None
         self._warp_until = 0.0
         self._scroll_accum_x = 0.0
@@ -334,6 +355,17 @@ class WindowsInputBackend:
             )
             if not self._mouse_hook:
                 raise OSError(ctypes.get_last_error(), "SetWindowsHookExW(mouse) failed")
+            # Safety net for a crashed previous instance: if the last run died
+            # while the cursor shape was blanked, the system arrow would stay
+            # invisible. Re-setting the current arrow restores it cheaply and
+            # heals that state (idempotent when it was never blanked).
+            with contextlib.suppress(Exception):
+                user32.SetSystemCursor(
+                    user32.CopyCursor(
+                        user32.LoadCursorW(None, ctypes.c_void_p(OCR_NORMAL))
+                    ),
+                    OCR_NORMAL,
+                )
             self._ready.set()
             msg = MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -780,9 +812,23 @@ class WindowsInputBackend:
             self._apply_cursor_visibility()
 
     def _apply_cursor_visibility(self) -> None:
-        """Apply the desired visibility on the current thread."""
+        """Apply the desired visibility on the current thread.
+
+        The ShowCursor counter alone cannot hide the cursor: the OS
+        auto-shows it on any physical activity, so the counter drifts back
+        to >= 0 and the idle machine's parked cursor reappears next to the
+        driven one (the 'parallel display' symptom). While hidden, the
+        system's normal arrow is therefore swapped for a fully transparent
+        cursor — the OS cannot draw what has no pixels — and the original
+        (themed) arrow is restored on show/stop.
+        """
         with self._lock:
             if not self._cursor_hidden:
+                if self._saved_system_cursor is not None:
+                    user32.SetSystemCursor(self._saved_system_cursor, OCR_NORMAL)
+                    self._saved_system_cursor = None
+                    self._blank_cursor = None
+                    log.info("system cursor shape restored")
                 # ShowCursor returns the counter after the call; loop until it
                 # is non-negative so a drifted or double-decremented counter
                 # can never leave the cursor invisible. Capped to keep the
@@ -793,6 +839,16 @@ class WindowsInputBackend:
                     if counter >= 0:
                         break
             else:
+                if self._saved_system_cursor is None:
+                    original = user32.CopyCursor(
+                        user32.LoadCursorW(None, ctypes.c_void_p(OCR_NORMAL))
+                    )
+                    blank = self._make_blank_cursor()
+                    if original and blank:
+                        self._saved_system_cursor = original
+                        self._blank_cursor = blank
+                        if user32.SetSystemCursor(blank, OCR_NORMAL):
+                            log.info("system cursor shape blanked")
                 # A single ShowCursor(FALSE) decrement is NOT enough: the OS
                 # auto-shows the cursor on user activity, so the counter often
                 # sits at 0 or 1 and one decrement leaves the cursor visible.
@@ -802,6 +858,23 @@ class WindowsInputBackend:
                     log.debug("ShowCursor(FALSE) counter=%d", counter)
                     if counter < 0:
                         break
+
+    def _make_blank_cursor(self) -> Any:
+        """A fully transparent 1x1 cursor (AND + XOR masks all zero)."""
+        try:
+            hinst = kernel32.GetModuleHandleW(None)
+            mask = (ctypes.c_ubyte * 1)(0x00)
+            return user32.CreateCursor(
+                hinst,
+                0,
+                0,
+                1,
+                1,
+                ctypes.cast(mask, ctypes.c_void_p),
+                ctypes.cast(mask, ctypes.c_void_p),
+            )
+        except Exception:  # noqa: BLE001
+            return None
 
 
 __all__ = ["WindowsInputBackend"]

@@ -1006,14 +1006,15 @@ class MacOSInputBackend:
             self._cursor_hidden = True
 
     def ensure_cursor_hidden(self) -> None:
-        """Re-hide if macOS or another app made the cursor visible again."""
+        """Re-hide if macOS or another app made the cursor visible again.
+
+        Called from the 0.25s health tick while hidden, so no internal rate
+        limit is needed — any frame the OS drew the cursor gets re-hidden
+        within one tick.
+        """
         if not self._cursor_hidden:
             return
-        now = time.monotonic()
         with self._lock:
-            if now - self._last_cursor_check < 0.25:
-                return
-            self._last_cursor_check = now
             with contextlib.suppress(Exception):
                 if Quartz.CGCursorIsDrawnInFramebuffer():
                     error = Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
